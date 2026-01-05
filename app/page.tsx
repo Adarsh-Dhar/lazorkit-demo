@@ -2,6 +2,7 @@
 
 import { useState } from "react"
 import { useRouter } from "next/navigation"
+import { useWallet } from "@lazorkit/wallet"
 import Header from "@/components/header"
 import HeroSection from "@/components/hero-section"
 import { useTheme } from "@/hooks/use-theme"
@@ -12,7 +13,7 @@ import { Loader2, CheckCircle2, RefreshCw, Zap } from "lucide-react"
 
 export default function Home() {
   const { isDark, toggleTheme } = useTheme()
-  const [isConnected, setIsConnected] = useState(false)
+  const { isConnected, disconnect } = useWallet()
   const [activeTab, setActiveTab] = useState<"home" | "subscription">("home")
   const router = useRouter()
 
@@ -23,22 +24,17 @@ export default function Home() {
   >([])
   const [balance, setBalance] = useState(100)
 
-  const handleConnect = () => {
-    setIsConnected(true)
-    console.log("Lazorkit: Wallet Connected")
-  }
-
-  const handleDisconnect = () => {
-    setIsConnected(false)
-    setSubscriptionStatus("inactive")
-    setActiveTab("home")
-  }
-
   const handleSubscribe = async () => {
     setSubscriptionStatus("processing")
     await new Promise((resolve) => setTimeout(resolve, 2000))
     setSubscriptionStatus("active")
     addBillingRecord("Initial Charge")
+  }
+
+  const handleDisconnect = () => {
+    disconnect()
+    setSubscriptionStatus("inactive")
+    setActiveTab("home")
   }
 
   const handleSimulateRecurringCharge = async () => {
@@ -70,13 +66,7 @@ export default function Home() {
     <div
       className={`min-h-screen bg-background text-foreground transition-colors duration-200 ${isDark ? "dark" : ""}`}
     >
-      <Header
-        isConnected={isConnected}
-        onConnect={handleConnect}
-        isDark={isDark}
-        onToggleTheme={toggleTheme}
-        onDisconnect={handleDisconnect}
-      />
+      <Header />
 
       <main className="pt-16">
         {isConnected && (
@@ -107,7 +97,7 @@ export default function Home() {
         )}
 
         {/* Home Tab */}
-        {activeTab === "home" && <HeroSection onConnect={handleConnect} isConnected={isConnected} />}
+        {activeTab === "home" && <HeroSection onConnect={() => {}} isConnected={isConnected} />}
 
         {/* Subscription Tab */}
         {activeTab === "subscription" && isConnected && (

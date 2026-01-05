@@ -2,16 +2,25 @@
 
 import { Moon, Sun, Zap, LogOut } from "lucide-react"
 import { Button } from "@/components/ui/button"
+import { useWallet } from "@lazorkit/wallet"
+import { useTheme } from "next-themes"
+import { useEffect, useState } from "react"
 
-interface HeaderProps {
-  isConnected: boolean
-  onConnect: () => void
-  isDark: boolean
-  onToggleTheme: () => void
-  onDisconnect?: () => void
-}
+export default function Header() {
+  const { connect, disconnect, isConnected, isConnecting, wallet } = useWallet()
+  const { theme, setTheme } = useTheme()
+  const [mounted, setMounted] = useState(false)
+  
+  useEffect(() => {
+    setMounted(true)
+  }, [])
+  
+  const handleToggleTheme = () => {
+    setTheme(theme === "dark" ? "light" : "dark")
+  }
 
-export default function Header({ isConnected, onConnect, isDark, onToggleTheme, onDisconnect }: HeaderProps) {
+  if (!mounted) return null
+
   return (
     <header className="fixed top-0 left-0 right-0 border-b border-border bg-background/80 backdrop-blur-sm z-50">
       <div className="px-8 py-4 flex items-center justify-between max-w-7xl mx-auto w-full">
@@ -21,9 +30,9 @@ export default function Header({ isConnected, onConnect, isDark, onToggleTheme, 
         </div>
 
         <div className="flex items-center gap-4">
-          {isConnected ? (
+          {isConnected && wallet ? (
             <Button
-              onClick={onDisconnect}
+              onClick={() => disconnect()}
               size="sm"
               className="bg-destructive/10 text-destructive hover:bg-destructive/20 gap-2 border border-destructive/30 transition-all duration-200"
             >
@@ -32,11 +41,12 @@ export default function Header({ isConnected, onConnect, isDark, onToggleTheme, 
             </Button>
           ) : (
             <Button
-              onClick={onConnect}
+              onClick={() => connect()}
+              disabled={isConnecting}
               size="sm"
               className="bg-accent text-accent-foreground hover:bg-accent/90 gap-2 transition-all duration-200 font-medium shadow-lg hover:shadow-xl"
             >
-              Login with Passkey
+              {isConnecting ? "Connecting..." : "Login with Passkey"}
             </Button>
           )}
 
@@ -47,11 +57,11 @@ export default function Header({ isConnected, onConnect, isDark, onToggleTheme, 
             </div>
 
             <button
-              onClick={onToggleTheme}
+              onClick={handleToggleTheme}
               className="p-2 hover:bg-muted rounded-md transition-colors duration-200"
               aria-label="Toggle theme"
             >
-              {isDark ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
+              {theme === "dark" ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
             </button>
           </div>
         </div>
