@@ -5,23 +5,20 @@ import { useWallet } from "@lazorkit/wallet" // 👈 The Real SDK
 import { 
   PublicKey, 
   Keypair,
-  TransactionInstruction
+  Connection
 } from "@solana/web3.js"
+import { 
+  createApproveInstruction,
+  getAssociatedTokenAddress,
+  TOKEN_PROGRAM_ID
+} from "@solana/spl-token"
 import Header from "@/components/header"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Loader2, CheckCircle2, Zap, RefreshCw, AlertCircle } from "lucide-react"
+import { SOLANA_CONFIG, LAZORKIT_CONFIG } from "@/lib/config"
 
-// Configuration - Initialize only when component mounts
-function getConfig() {
-  return {
-    MERCHANT_WALLET: new PublicKey("TokenkegQfeZyiNwAJsyFbPVwwQQfjourPAxMmUP7Pc"),
-    USDC_MINT: new PublicKey("EPjFWaJY6ER7z8vNmwrBb5aMsCGkjnEYDSXjPVREXcd"),
-    // Use a valid generated public key for the mock user
-    MOCK_USER_ADDRESS: Keypair.generate().publicKey
-  }
-}
 
 export default function SubscriptionPageContent() {
   const { 
@@ -35,48 +32,117 @@ export default function SubscriptionPageContent() {
   const [billingHistory, setBillingHistory] = useState<Array<{ id: string; amount: string; date: string; status: string }>>([])
   const [balance, setBalance] = useState(100)
   const [sessionKey, setSessionKey] = useState<Keypair | null>(null)
-
-  const config = getConfig()
+  const [errorMessage, setErrorMessage] = useState<string | null>(null)
 
   // 1. THE SETUP: User delegates authority (Signs 1 time with Passkey)
   const handleSubscribe = async () => {
+    console.log("🔵 handleSubscribe called");
+    console.log("isConnected:", isConnected);
+    console.log("wallet:", wallet);
+
     if (!isConnected || !wallet) {
+      console.log("❌ Wallet not connected, calling connect()...");
       await connect();
       return;
     }
 
     setStatus("authorizing");
+    setErrorMessage(null);
+    console.log("✅ Starting subscription flow...");
 
     try {
       // A. Generate a fresh Session Key
       const newSessionKey = Keypair.generate();
+      console.log("✅ Generated Session Key:", newSessionKey.publicKey.toString());
 
-      // B. Create the memo instruction (requires at least one account key)
-      // Reference the USDC mint as an account key
-      const memoInstruction = new TransactionInstruction({
-        keys: [
-          {
-            pubkey: config.USDC_MINT,
-            isSigner: false,
-            isWritable: false
-          }
-        ],
-        programId: new PublicKey("MemoSq4gDiYvj6v8V9PkXcLJvWb4nKQGiRCmhfLyGCK"),
-        data: Buffer.from(`Delegation: Session Key ${newSessionKey.publicKey.toString().slice(0, 8)}... authorized for 5 USDC/month`, 'utf-8')
-      });
+      // B. Get the wallet's public key from passkeyPubkey
+      // The passkeyPubkey is a 33-byte array where:
+      //   - First byte is the prefix (0x03 or 0x02 for compressed ed25519)
+      //   - Next 32 bytes are the actual public key
+      const passkeyArray = (wallet as any).passkeyPubkey;
+      console.log("passkeyPubkey array:", passkeyArray);
+      console.log("passkeyPubkey length:", passkeyArray?.length);
+      
+      if (!passkeyArray || !Array.isArray(passkeyArray) || passkeyArray.length !== 33) {
+        throw new Error("Invalid passkeyPubkey format");
+      }
 
-      // C. Execute using Lazorkit (Gasless + Passkey)
+      // Skip the first byte (compression prefix), use the 32-byte key
+      const pubkeyBytes = new Uint8Array(passkeyArray.slice(1, 33));
+      console.log("pubkeyBytes (32 bytes):", pubkeyBytes);
+      const walletPublicKey = new PublicKey(pubkeyBytes);
+      console.log("✅ Created PublicKey from passkeyPubkey:", walletPublicKey.toString());
+
+      console.log("✅ User wallet PublicKey:", walletPublicKey.toString());
+
+      // C. Get the user's USDC Associated Token Account (ATA)
+      console.log("⏳ Fetching user's USDC ATA...");
+      const userATA = await getAssociatedTokenAddress(
+        SOLANA_CONFIG.USDC_MINT,
+        walletPublicKey
+      );
+      console.log("✅ User USDC ATA:", userATA.toString());
+
+      // D. Verify the USDC account actually exists on-chain
+      console.log("⏳ Verifying USDC account exists on devnet...");
+      const connection = new Connection(LAZORKIT_CONFIG.rpc, "confirmed");
+      const accountInfo = await connection.getAccountInfo(userATA);
+      
+      if (!accountInfo) {
+        throw new Error(
+          `USDC account not found at ${userATA.toString()}. ` +
+          "You need to create a USDC token account first. " +
+          "Visit https://faucet.solana.com or use Phantom wallet to create one."
+        );
+      }
+      console.log("✅ USDC account exists!");
+
+      // E. Create REAL SPL Token Approval Instruction
+      console.log("⏳ Creating SPL Token Approval instruction...");
+      const approveInstruction = createApproveInstruction(
+        userATA,                                        // From: User's USDC Account
+        newSessionKey.publicKey,                        // Delegate: The Session Key
+        walletPublicKey,                                // Owner: The User (must sign)
+        SOLANA_CONFIG.subscriptionAmountTokens,         // Amount: 5 USDC (in token units)
+        [],                                             // No multi-signers
+        TOKEN_PROGRAM_ID
+      );
+      console.log("✅ Approval instruction created");
+
+      // F. Execute using Lazorkit (Gasless + Passkey)
+      console.log("⏳ Signing transaction with Lazorkit...");
       const signature = await signAndSendTransaction({
-        instructions: [memoInstruction]
+        instructions: [approveInstruction],
       });
 
-      console.log("Delegation Success:", signature);
+      console.log("✅ SPL Token Approval Success:", signature);
+      console.log("🔑 Session Key authorized:", newSessionKey.publicKey.toString());
       setSessionKey(newSessionKey);
       setStatus("active");
       addBillingRecord("Initial Setup");
+      setErrorMessage(null);
 
     } catch (err) {
-      console.error("User rejected passkey or error:", err);
+      console.error("❌ Subscription error:", err);
+      
+      let errorMsg = "Failed to authorize subscription";
+      if (err instanceof Error) {
+        console.error("Error message:", err.message);
+        if (err.message.includes("rejected")) {
+          errorMsg = "You rejected the passkey signature";
+        } else if (err.message.includes("WebAuthn") || err.message.includes("TLS")) {
+          errorMsg = "Passkey signing requires HTTPS. Use a deployed version or ngrok with valid HTTPS";
+        } else if (err.message.includes("USDC account not found")) {
+          errorMsg = err.message;
+        } else if (err.message.includes("account does not exist")) {
+          errorMsg = "USDC account not found. You need to create a USDC token account on devnet first";
+        } else if (err.message.includes("InstructionError")) {
+          errorMsg = "Transaction failed. Ensure you have devnet SOL and a USDC token account";
+        } else {
+          errorMsg = `Error: ${err.message}`;
+        }
+      }
+      setErrorMessage(errorMsg);
       setStatus("idle");
     }
   };
@@ -145,6 +211,14 @@ export default function SubscriptionPageContent() {
                 </Badge>
               </CardTitle>
               <CardDescription>Automated monthly billing via Smart Wallet + Session Key</CardDescription>
+              {errorMessage && (
+                <div className="mt-3 p-3 bg-red-50 dark:bg-red-900/20 rounded-lg border border-red-200 dark:border-red-800">
+                  <p className="text-sm text-red-700 dark:text-red-400 flex items-center gap-2">
+                    <AlertCircle className="w-4 h-4" />
+                    {errorMessage}
+                  </p>
+                </div>
+              )}
             </CardHeader>
             <CardContent className="space-y-6">
               <div className="text-3xl font-bold">5 USDC <span className="text-sm font-normal text-slate-500">/ month</span></div>
@@ -159,6 +233,11 @@ export default function SubscriptionPageContent() {
               {status === "idle" ? (
                 <Button onClick={handleSubscribe} disabled={status !== "idle"} className="w-full h-12 text-lg">
                   🔐 Subscribe with Passkey
+                </Button>
+              ) : status === "authorizing" ? (
+                <Button disabled className="w-full h-12 text-lg bg-blue-500 hover:bg-blue-500">
+                  <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                  Authorizing... Check your passkey
                 </Button>
               ) : (
                 <div className="p-4 bg-green-50/50 dark:bg-green-900/20 rounded-lg border border-green-100 dark:border-green-900">
