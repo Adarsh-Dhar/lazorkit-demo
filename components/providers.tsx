@@ -4,21 +4,16 @@ import { LazorkitProvider } from '@lazorkit/wallet'
 import { ThemeProvider } from './theme-provider'
 import type React from 'react'
 
-const CONFIG = {
-  RPC_URL: "https://api.devnet.solana.com",
-  PORTAL_URL: "https://portal.lazor.sh",
-  PAYMASTER: { 
-    paymasterUrl: "https://kora.devnet.lazorkit.com" 
-  }
-}
-
 export function Providers({ children }: { children: React.ReactNode }) {
   return (
     <ThemeProvider attribute="class" defaultTheme="light" enableSystem>
       <LazorkitProvider
-        rpcUrl={CONFIG.RPC_URL}
-        portalUrl={CONFIG.PORTAL_URL}
-        paymasterConfig={CONFIG.PAYMASTER}
+        rpcUrl={process.env.NEXT_PUBLIC_RPC_URL || "https://api.devnet.solana.com"}
+        portalUrl="https://portal.lazorkit.com" // This is usually static
+        paymasterConfig={{ 
+          // 💡 FIXED: Now actually uses the environment variable
+          paymasterUrl: process.env.NEXT_PUBLIC_PAYMASTER_URL || "https://kora.devnet.lazorkit.com" 
+        }}
       >
         {children}
       </LazorkitProvider>
