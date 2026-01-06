@@ -41,8 +41,8 @@ export default function SubscriptionPageContent() {
     console.log("wallet:", wallet);
 
     if (!isConnected || !wallet) {
-      console.log("❌ Wallet not connected, calling connect()...");
-      await connect();
+      console.log("❌ Wallet not connected. Please connect using the button in the header.");
+      setErrorMessage("Please connect your wallet first using the Connect button.");
       return;
     }
 
