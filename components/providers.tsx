@@ -11,8 +11,7 @@ export function Providers({ children }: { children: React.ReactNode }) {
         rpcUrl={process.env.NEXT_PUBLIC_RPC_URL || "https://api.devnet.solana.com"}
         portalUrl="https://portal.lazor.sh"
         paymasterConfig={{ 
-          // 💡 FIXED: Now actually uses the environment variable
-          paymasterUrl: process.env.NEXT_PUBLIC_PAYMASTER_URL || "https://kora.devnet.lazorkit.com" 
+          paymasterUrl: process.env.NEXT_PUBLIC_PAYMASTER_URL || "https://lazorkit-paymaster.onrender.com" 
         }}
       >
         {children}
