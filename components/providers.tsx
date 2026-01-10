@@ -11,7 +11,7 @@ export function Providers({ children }: { children: React.ReactNode }) {
         rpcUrl={process.env.NEXT_PUBLIC_RPC_URL || "https://api.devnet.solana.com"}
         portalUrl="https://portal.lazor.sh"
         paymasterConfig={{ 
-          paymasterUrl: process.env.NEXT_PUBLIC_PAYMASTER_URL || "https://lazorkit-paymaster.onrender.com" 
+          paymasterUrl: process.env.NEXT_PUBLIC_PAYMASTER_URL || "https://kora.devnet.lazorkit.com" 
         }}
       >
         {children}
