@@ -5,7 +5,8 @@ import { useWallet } from "@lazorkit/wallet" // 👈 The Real SDK
 import { 
   PublicKey, 
   Keypair,
-  Connection
+  Connection,
+  AddressLookupTableAccount,
 } from "@solana/web3.js"
 import { 
   createApproveInstruction,
@@ -29,6 +30,28 @@ export default function SubscriptionPageContent() {
   } = useWallet()
 
   const [status, setStatus] = useState<"idle" | "authorizing" | "active">("idle")
+
+  const loadLookupTables = async (connection: Connection) => {
+    const lutEnv = process.env.NEXT_PUBLIC_LAZORKIT_LUTS
+    if (!lutEnv) return [] as AddressLookupTableAccount[]
+
+    const addresses = lutEnv
+      .split(",")
+      .map((a) => a.trim())
+      .filter(Boolean)
+
+    const tables: AddressLookupTableAccount[] = []
+    for (const addr of addresses) {
+      try {
+        const res = await connection.getAddressLookupTable(new PublicKey(addr))
+        if (res.value) tables.push(res.value)
+      } catch (error) {
+        console.warn(`Failed to fetch LUT ${addr}:`, error)
+      }
+    }
+
+    return tables
+  }
   const [billingHistory, setBillingHistory] = useState<Array<{ id: string; amount: string; date: string; status: string }>>([])
   const [balance, setBalance] = useState(100)
   const [sessionKey, setSessionKey] = useState<Keypair | null>(null)
@@ -111,8 +134,15 @@ export default function SubscriptionPageContent() {
 
       // F. Execute using Lazorkit (Gasless + Passkey)
       console.log("⏳ Signing transaction with Lazorkit...");
+      
+      // Load lookup tables if configured
+      const addressLookupTableAccounts = await loadLookupTables(connection);
+      
       const signature = await signAndSendTransaction({
         instructions: [approveInstruction],
+        transactionOptions: addressLookupTableAccounts.length > 0 ? {
+          addressLookupTableAccounts,
+        } : undefined,
       });
 
       console.log("✅ SPL Token Approval Success:", signature);

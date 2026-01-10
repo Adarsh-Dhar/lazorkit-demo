@@ -24,6 +24,8 @@ This repo demonstrates how to integrate **Lazorkit SDK** into a Next.js 15 app. 
     ```bash
     NEXT_PUBLIC_RPC_URL="https://api.devnet.solana.com"
     NEXT_PUBLIC_PAYMASTER_URL="<YOUR_LAZORKIT_API_KEY>"
+    # Optional: Address Lookup Table addresses (comma-separated) for large transactions
+    NEXT_PUBLIC_LAZORKIT_LUTS=""
     ```
 
 3.  **Run the App**
@@ -111,6 +113,23 @@ const transferIx = createTransferInstruction(
 * `app/subscription/`: Contains the Smart Wallet logic for automated billing.
 * `components/providers.tsx`: Global Lazorkit configuration.
 * `components/ui/`: Reusable UI components (Shadcn UI).
+
+## ⚠️ Troubleshooting
+
+### "Transaction too large" Error
+
+If you receive an error like `Transaction too large: 1298 > 1232`, this means your transaction is exceeding Solana's size limit. 
+
+**Solution:** Use **Address Lookup Tables (ALTs)** to reduce transaction size:
+
+1. Create lookup tables on-chain for frequently-used addresses (e.g., token mints, user accounts).
+2. Add the table addresses to `.env.local`:
+   ```bash
+   NEXT_PUBLIC_LAZORKIT_LUTS="ALT_ADDRESS_1,ALT_ADDRESS_2"
+   ```
+3. The app will automatically load and include these tables in transactions, compressing the size.
+
+For Solana devnet, check existing ALTs or create new ones using tools like [Metaplex](https://docs.metaplex.com).
 
 ## 📄 License
 
