@@ -7,11 +7,16 @@ import {
   Keypair,
   Connection,
   AddressLookupTableAccount,
+  VersionedTransaction,
+  TransactionMessage,
 } from "@solana/web3.js"
 import { 
   createApproveInstruction,
   getAssociatedTokenAddress,
-  TOKEN_PROGRAM_ID
+  createAssociatedTokenAccountIdempotentInstruction,
+  TOKEN_PROGRAM_ID,
+  TOKEN_2022_PROGRAM_ID,
+  ASSOCIATED_TOKEN_PROGRAM_ID
 } from "@solana/spl-token"
 import Header from "@/components/header"
 import { Button } from "@/components/ui/button"
@@ -78,71 +83,110 @@ export default function SubscriptionPageContent() {
       const newSessionKey = Keypair.generate();
       console.log("✅ Generated Session Key:", newSessionKey.publicKey.toString());
 
-      // B. Get the wallet's public key from passkeyPubkey
-      // The passkeyPubkey is a 33-byte array where:
-      //   - First byte is the prefix (0x03 or 0x02 for compressed ed25519)
-      //   - Next 32 bytes are the actual public key
-      const passkeyArray = (wallet as any).passkeyPubkey;
-      console.log("passkeyPubkey array:", passkeyArray);
-      console.log("passkeyPubkey length:", passkeyArray?.length);
-      
-      if (!passkeyArray || !Array.isArray(passkeyArray) || passkeyArray.length !== 33) {
-        throw new Error("Invalid passkeyPubkey format");
+      // B. Get the smart wallet address (the actual owner of token accounts)
+      const smartWalletStr = (wallet as any).smartWallet;
+      if (!smartWalletStr) {
+        throw new Error("Smart wallet address unavailable");
       }
-
-      // Skip the first byte (compression prefix), use the 32-byte key
-      const pubkeyBytes = new Uint8Array(passkeyArray.slice(1, 33));
-      console.log("pubkeyBytes (32 bytes):", pubkeyBytes);
-      const walletPublicKey = new PublicKey(pubkeyBytes);
-      console.log("✅ Created PublicKey from passkeyPubkey:", walletPublicKey.toString());
-
-      console.log("✅ User wallet PublicKey:", walletPublicKey.toString());
+      const smartWalletPubkey = new PublicKey(smartWalletStr);
+      console.log("✅ Smart Wallet PublicKey:", smartWalletPubkey.toString());
 
       // C. Get the user's USDC Associated Token Account (ATA)
       console.log("⏳ Fetching user's USDC ATA...");
+      const connection = new Connection(LAZORKIT_CONFIG.rpc, "confirmed");
+
+      // Detect whether the mint uses Token Program or Token-2022 Program
+      const mintInfo = await connection.getAccountInfo(SOLANA_CONFIG.USDC_MINT);
+      if (!mintInfo) {
+        throw new Error("USDC mint not found on devnet. Update SOLANA_CONFIG.USDC_MINT");
+      }
+      const tokenProgramId = mintInfo.owner.equals(TOKEN_2022_PROGRAM_ID)
+        ? TOKEN_2022_PROGRAM_ID
+        : TOKEN_PROGRAM_ID;
+      console.log("✅ Resolved token program:", tokenProgramId.toBase58());
+
       const userATA = await getAssociatedTokenAddress(
         SOLANA_CONFIG.USDC_MINT,
-        walletPublicKey
+        smartWalletPubkey,
+        true,
+        tokenProgramId,
+        ASSOCIATED_TOKEN_PROGRAM_ID
       );
       console.log("✅ User USDC ATA:", userATA.toString());
 
-      // D. Verify the USDC account actually exists on-chain
+      // D. Verify the USDC account actually exists on-chain; create if missing
       console.log("⏳ Verifying USDC account exists on devnet...");
-      const connection = new Connection(LAZORKIT_CONFIG.rpc, "confirmed");
-      const accountInfo = await connection.getAccountInfo(userATA);
-      
+      let accountInfo = await connection.getAccountInfo(userATA);
+
       if (!accountInfo) {
-        throw new Error(
-          `USDC account not found at ${userATA.toString()}. ` +
-          "You need to create a USDC token account first. " +
-          "Visit https://faucet.solana.com or use Phantom wallet to create one."
-        );
+        console.log("⚠️ USDC ATA missing. Creating token account...");
+        try {
+          const createAtaIx = createAssociatedTokenAccountIdempotentInstruction(
+            smartWalletPubkey,      // payer
+            userATA,                // associatedToken
+            smartWalletPubkey,      // owner
+            SOLANA_CONFIG.USDC_MINT,// mint
+            tokenProgramId,         // tokenProgramId (Token or Token-2022)
+            ASSOCIATED_TOKEN_PROGRAM_ID // associatedTokenProgramId
+          );
+
+          // Sign and send the ATA creation transaction
+          const createAtaSig = await signAndSendTransaction({
+            instructions: [createAtaIx],
+          });
+          console.log("✅ USDC ATA creation signature:", createAtaSig);
+          
+          // Wait for confirmation before proceeding
+          console.log("⏳ Waiting for ATA creation confirmation...");
+          await new Promise(resolve => setTimeout(resolve, 3000));
+          
+          // Verify it was created
+          accountInfo = await connection.getAccountInfo(userATA);
+          if (!accountInfo) {
+            throw new Error("USDC ATA creation failed - account not found after confirmation wait");
+          }
+          console.log("✅ USDC ATA verified on-chain");
+        } catch (ataError) {
+          console.error("❌ Failed to create USDC ATA:", ataError);
+          throw new Error(`Cannot proceed without USDC token account: ${ataError instanceof Error ? ataError.message : String(ataError)}`);
+        }
+      } else {
+        console.log("✅ USDC account exists and is initialized");
       }
-      console.log("✅ USDC account exists!");
 
       // E. Create REAL SPL Token Approval Instruction
       console.log("⏳ Creating SPL Token Approval instruction...");
       const approveInstruction = createApproveInstruction(
         userATA,                                        // From: User's USDC Account
         newSessionKey.publicKey,                        // Delegate: The Session Key
-        walletPublicKey,                                // Owner: The User (must sign)
+        smartWalletPubkey,                              // Owner: Smart Wallet (must sign)
         SOLANA_CONFIG.subscriptionAmountTokens,         // Amount: 5 USDC (in token units)
         [],                                             // No multi-signers
-        TOKEN_PROGRAM_ID
+        tokenProgramId
       );
       console.log("✅ Approval instruction created");
 
-      // F. Execute using Lazorkit (Gasless + Passkey)
+      // F. Load Address Lookup Tables to reduce transaction size
+      console.log("⏳ Loading Address Lookup Tables...");
+      const lookupTables = await loadLookupTables(connection);
+      console.log("✅ Loaded", lookupTables.length, "lookup tables");
+
+      // G. Build v0 transaction with LUTs to optimize size
+      let blockhash = (await connection.getLatestBlockhash()).blockhash;
+      const messageV0 = new TransactionMessage({
+        payerKey: smartWalletPubkey,
+        recentBlockhash: blockhash,
+        instructions: [approveInstruction],
+      }).compileToV0Message(lookupTables);
+
+      const txSize = messageV0.serialize().length;
+      console.log(`⏳ Transaction size: ${txSize} bytes (limit: 1232)`);
+
+      // H. Execute using Lazorkit (Gasless + Passkey)
       console.log("⏳ Signing transaction with Lazorkit...");
-      
-      // Load lookup tables if configured
-      const addressLookupTableAccounts = await loadLookupTables(connection);
       
       const signature = await signAndSendTransaction({
         instructions: [approveInstruction],
-        transactionOptions: addressLookupTableAccounts.length > 0 ? {
-          addressLookupTableAccounts,
-        } : undefined,
       });
 
       console.log("✅ SPL Token Approval Success:", signature);
@@ -158,7 +202,9 @@ export default function SubscriptionPageContent() {
       let errorMsg = "Failed to authorize subscription";
       if (err instanceof Error) {
         console.error("Error message:", err.message);
-        if (err.message.includes("rejected")) {
+        if (err.message.includes("Cannot proceed without USDC token account")) {
+          errorMsg = "Failed to create USDC token account. Ensure you have devnet SOL for fees and that your RPC endpoint is working";
+        } else if (err.message.includes("rejected")) {
           errorMsg = "You rejected the passkey signature";
         } else if (err.message.includes("WebAuthn") || err.message.includes("TLS")) {
           errorMsg = "Passkey signing requires HTTPS. Use a deployed version or ngrok with valid HTTPS";
@@ -166,8 +212,12 @@ export default function SubscriptionPageContent() {
           errorMsg = err.message;
         } else if (err.message.includes("account does not exist")) {
           errorMsg = "USDC account not found. You need to create a USDC token account on devnet first";
+        } else if (err.message.includes("InvalidAccountData") || err.message.includes("invalid account data")) {
+          errorMsg = "Invalid token account data. The USDC ATA may not be properly initialized. Try connecting with a fresh wallet";
         } else if (err.message.includes("InstructionError")) {
-          errorMsg = "Transaction failed. Ensure you have devnet SOL and a USDC token account";
+          errorMsg = "Transaction failed. Ensure you have devnet SOL and a valid USDC token account";
+        } else if (err.message.includes("Transaction too large")) {
+          errorMsg = "Transaction too large. This shouldn't happen with optimized instructions";
         } else {
           errorMsg = `Error: ${err.message}`;
         }

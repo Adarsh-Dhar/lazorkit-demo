@@ -4,11 +4,11 @@ import { PublicKey } from "@solana/web3.js";
  * Solana devnet configuration for the gasless guestbook subscription system
  */
 export const SOLANA_CONFIG = {
-  // USDC mint on devnet
-  USDC_MINT: new PublicKey("EPjFWaJY6ER7z8vNmwrBb5aMsCGkjnEYDSXjPVREXcd"),
+  // USDC mint on devnet (official devnet USDC)
+  USDC_MINT: new PublicKey("4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"),
 
-  // Merchant/receiver wallet for subscription approvals
-  MERCHANT_WALLET: new PublicKey("TokenkegQfeZyiNwAJsyFbPVwwQQfjourPAxMmUP7Pc"),
+  // Merchant/receiver wallet for subscription approvals (placeholder - update with your wallet)
+  MERCHANT_WALLET: new PublicKey("11111111111111111111111111111111"),
 
   // Subscription tier amount (5 USDC with 6 decimals)
   SUBSCRIPTION_AMOUNT_USDC: 5,
