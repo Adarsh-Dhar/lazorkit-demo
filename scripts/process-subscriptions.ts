@@ -101,14 +101,16 @@ async function processSubscriptions() {
 
       // Create transfer instruction: from USER's USDC account to merchant
       // The session key acts as a DELEGATE (signs for the user)
+      // CRITICAL: owner must be the USER (who owns the token account),
+      // but the session key (delegate) will sign the transaction
       const transferIx = createTransferCheckedInstruction(
         userUsdcAccount,          // Source (User's USDC ATA)
         SOLANA_CONFIG.USDC_MINT,  // Mint address
         merchantUsdcAccount,      // Destination (Merchant's USDC ATA)
-        sessionKey.publicKey,     // Owner/Delegate (Session key signs)
+        userWallet,               // Owner (User owns the account)
         usdcAmount,               // Amount in smallest units
         SOLANA_CONFIG.USDC_DECIMALS, // Decimals
-        [],                       // Multi-signers
+        [sessionKey],             // Multi-signers: Session key signs as delegate
         TOKEN_PROGRAM_ID
       );
 
