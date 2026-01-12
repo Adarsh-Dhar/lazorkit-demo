@@ -1,7 +1,7 @@
 import { Connection, PublicKey } from "@solana/web3.js";
 
 // [CHANGE 1] Use a reliable RPC. Public ones lag and cause "TransactionTooOld".
-const RPC_URL = process.env.RPC_URL; // Free tier key, or use your own
+const RPC_URL = process.env.NEXT_PUBLIC_RPC_URL; // Free tier key, or use your own
 
 export const SOLANA_CONFIG = {
   RPC_URL,

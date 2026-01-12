@@ -24,6 +24,8 @@ export default function SubscriptionPageContent() {
   const { isConnected, signAndSendTransaction, wallet } = useWallet()
   const [status, setStatus] = useState<"idle" | "authorizing" | "active">("idle")
   const [balance, setBalance] = useState<number | null>(null)
+  const [balanceLoading, setBalanceLoading] = useState(false)
+  const [balanceError, setBalanceError] = useState<string | null>(null)
   const [subscriptionId, setSubscriptionId] = useState<string | null>(null)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [subscriptionMonths, setSubscriptionMonths] = useState(1)
@@ -32,7 +34,13 @@ export default function SubscriptionPageContent() {
 
   // Helper to fetch balance
   const fetchBalance = async () => {
-    if (!wallet) return
+    setBalanceLoading(true)
+    setBalanceError(null)
+    setBalance(null)
+    if (!wallet) {
+      setBalanceLoading(false)
+      return
+    }
     try {
       if(!LAZORKIT_CONFIG.rpc) throw new Error("RPC URL not configured")
       const connection = new Connection(LAZORKIT_CONFIG.rpc, "confirmed")
@@ -43,15 +51,25 @@ export default function SubscriptionPageContent() {
         try {
           const accountInfo = await connection.getTokenAccountBalance(userUsdcAccount, "confirmed")
           setBalance(accountInfo.value.uiAmount)
-        } catch(e) { setBalance(0) }
+        } catch(e) {
+          setBalance(0)
+        }
+      } else {
+        setBalanceError("No smart wallet address found.")
       }
-    } catch (err) {
-      console.error("Balance fetch error", err)
+    } catch (err: any) {
+      setBalanceError(err?.message || "Balance fetch error")
+    } finally {
+      setBalanceLoading(false)
     }
   }
 
   useEffect(() => {
     if (isConnected && wallet) fetchBalance()
+    else {
+      setBalance(null)
+      setBalanceError(null)
+    }
   }, [isConnected, wallet])
 
   const handleSubscribe = async () => {
@@ -67,19 +85,33 @@ export default function SubscriptionPageContent() {
       const newSessionKey = Keypair.generate();
       const smartWalletStr = (wallet as any).smartWallet;
       // Use smart wallet as payer/owner
-      const payerPubkey = new PublicKey(smartWalletStr); 
-      
+      const payerPubkey = new PublicKey(smartWalletStr);
+
+      // Debug: Print smart wallet address and SOL balance
+      if (LAZORKIT_CONFIG.rpc) {
+        const connection = new Connection(LAZORKIT_CONFIG.rpc, "confirmed");
+        const solBalance = await connection.getBalance(payerPubkey, "confirmed");
+        console.log("Smart Wallet Address:", payerPubkey.toString());
+        console.log("Smart Wallet SOL Balance:", solBalance / 1_000_000_000, "SOL");
+      }
+
+
       const userUsdcAccount = await getUserUsdcAta(payerPubkey);
       const totalAmountToApprove = SOLANA_CONFIG.getUsdcAmountForMonths(subscriptionMonths);
-      
-      // 1. Create Funding Instruction (0.005 SOL is enough for many transactions)
-      const fundIx = SystemProgram.transfer({
-        fromPubkey: payerPubkey,
-        toPubkey: newSessionKey.publicKey,
-        lamports: 0.005 * 1_000_000_000, 
-      });
 
-      // 2. Create Approval Instruction
+      // Debug: Print USDC token account address and balance
+      if (LAZORKIT_CONFIG.rpc) {
+        const connection = new Connection(LAZORKIT_CONFIG.rpc, "confirmed");
+        try {
+          const usdcBalance = await connection.getTokenAccountBalance(userUsdcAccount, "confirmed");
+          console.log("USDC Token Account:", userUsdcAccount.toString());
+          console.log("USDC Token Balance:", usdcBalance.value.uiAmount, "USDC");
+        } catch (e) {
+          console.log("USDC Token Account does not exist or is not initialized:", userUsdcAccount.toString());
+        }
+      }
+
+      // Only create SPL token approval instruction (no SOL transfer)
       const approveIx = createApproveInstruction(
         userUsdcAccount,
         newSessionKey.publicKey,
@@ -88,8 +120,8 @@ export default function SubscriptionPageContent() {
       );
 
       console.log("⏳ Saving session key...");
-      
-      // 3. Save to Backend
+
+      // Save to Backend
       const saveRes = await fetch("/api/subscription/create", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -108,10 +140,10 @@ export default function SubscriptionPageContent() {
       setSubscriptionId(saveData.subscriptionId);
 
       console.log("⏳ Requesting Signature...");
-      
-      // 4. Send Transaction
+
+      // Only send SPL token approval instruction
       const signature = await signAndSendTransaction({
-        instructions: [fundIx, approveIx],
+        instructions: [approveIx],
       });
 
       console.log("✅ Setup Successful:", signature);
@@ -215,7 +247,10 @@ export default function SubscriptionPageContent() {
           </Card>
 
           <div className="space-y-4">
-             <h3 className="font-semibold">History <span className="text-sm text-slate-500 font-normal ml-2">Bal: {balance?.toFixed(2) ?? '...'} USDC</span></h3>
+             <h3 className="font-semibold">History <span className="text-sm text-slate-500 font-normal ml-2">
+               Bal: {balanceLoading ? <Loader2 className="inline w-4 h-4 animate-spin align-middle" /> : balanceError ? <span className="text-red-500">Err</span> : balance !== null ? balance.toFixed(2) : '...'} USDC
+             </span></h3>
+             {balanceError && <div className="text-xs text-red-500">Balance error: {balanceError}</div>}
              <div className="space-y-3">
                 {billingHistory.map((tx) => (
                     <div key={tx.id} className="flex justify-between p-4 bg-white rounded-lg border shadow-sm">
