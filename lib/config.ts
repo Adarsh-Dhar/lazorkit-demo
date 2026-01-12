@@ -4,19 +4,32 @@ import { PublicKey } from "@solana/web3.js";
  * Solana devnet configuration for the gasless guestbook subscription system
  */
 export const SOLANA_CONFIG = {
-  // USDC mint on devnet (official devnet USDC)
+  // USDC mint on devnet (official devnet USDC) - keeping for potential future use
   USDC_MINT: new PublicKey("4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"),
 
-  // Merchant/receiver wallet for subscription approvals (placeholder - update with your wallet)
-  MERCHANT_WALLET: new PublicKey("11111111111111111111111111111111"),
+  // Merchant/receiver wallet for subscription approvals (set to a real address)
+  MERCHANT_WALLET: new PublicKey("29btcGViz61Db5c1HTeEyw9p5rpDQG87VYNe1WupQnDL"), // Smart wallet receives the subscription payment
 
-  // Subscription tier amount (5 USDC with 6 decimals)
-  SUBSCRIPTION_AMOUNT_USDC: 5,
-  USDC_DECIMALS: 6,
+  // Subscription tier: monthly rate in SOL
+  SUBSCRIPTION_MONTHLY_RATE_SOL: 0.01,
+  SOL_DECIMALS: 9,
 
-  // Derived amount in smallest units (lamports/tokens)
-  get subscriptionAmountTokens() {
-    return this.SUBSCRIPTION_AMOUNT_USDC * Math.pow(10, this.USDC_DECIMALS);
+  // Helper: calculate total SOL for N months
+  getTotalForMonths(months: number) {
+    return this.SUBSCRIPTION_MONTHLY_RATE_SOL * months;
+  },
+
+  // Helper: calculate lamports for N months
+  getLamportsForMonths(months: number) {
+    return Math.round(this.getTotalForMonths(months) * Math.pow(10, this.SOL_DECIMALS));
+  },
+
+  // Backward compatibility
+  get subscriptionAmountLamports() {
+    return this.getLamportsForMonths(1);
+  },
+  get SUBSCRIPTION_AMOUNT_SOL() {
+    return this.SUBSCRIPTION_MONTHLY_RATE_SOL;
   },
 } as const;
 
