@@ -70,17 +70,16 @@ export async function POST(req: Request) {
     const usdcAmount = BigInt(Math.round(sub.monthlyRate * Math.pow(10, SOLANA_CONFIG.USDC_DECIMALS)));
 
     // Create the transfer instruction: from USER's USDC account to merchant
-    // The session key acts as a DELEGATE (signs for the user)
-    // CRITICAL: owner must be the USER (who owns the token account),
-    // but the session key (delegate) will sign the transaction
+    // The session key acts as a DELEGATE (has approval authority)
+    // Authority (4th param) must be the Session Key (the delegate who can spend)
     const transferIx = createTransferCheckedInstruction(
       userUsdcAccount,          // Source (User's USDC ATA)
       SOLANA_CONFIG.USDC_MINT,  // Mint address
       merchantUsdcAccount,      // Destination (Merchant's USDC ATA)
-      userWallet,               // Owner (User owns the account)
+      sessionKey.publicKey,     // Authority: The Delegate (Session Key)
       usdcAmount,               // Amount in smallest units
       SOLANA_CONFIG.USDC_DECIMALS, // Decimals
-      [sessionKey],             // Multi-signers: Session key signs as delegate
+      [],                       // No multisigners - session key is the sole authority
       TOKEN_PROGRAM_ID
     );
 
