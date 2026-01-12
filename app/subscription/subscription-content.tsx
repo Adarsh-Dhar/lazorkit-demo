@@ -1,3 +1,4 @@
+// app/subscription/subscription-content.tsx
 "use client"
 
 import { useState, useEffect } from "react"
@@ -29,20 +30,23 @@ export default function SubscriptionPageContent() {
   const [remainingMonths, setRemainingMonths] = useState(0)
   const [billingHistory, setBillingHistory] = useState<Array<{ id: string; amount: string; date: string; status: string }>>([])
 
-  // Fetch Balance Helper
+  // Helper to fetch balance
   const fetchBalance = async () => {
     if (!wallet) return
     try {
+      if(!LAZORKIT_CONFIG.rpc) throw new Error("RPC URL not configured")
       const connection = new Connection(LAZORKIT_CONFIG.rpc, "confirmed")
       const smartWalletStr = (wallet as any).smartWallet
       if (smartWalletStr) {
         const smartWalletPubkey = new PublicKey(smartWalletStr)
         const userUsdcAccount = await getUserUsdcAta(smartWalletPubkey)
-        const accountInfo = await connection.getTokenAccountBalance(userUsdcAccount, "confirmed")
-        setBalance(accountInfo.value.uiAmount)
+        try {
+          const accountInfo = await connection.getTokenAccountBalance(userUsdcAccount, "confirmed")
+          setBalance(accountInfo.value.uiAmount)
+        } catch(e) { setBalance(0) }
       }
     } catch (err) {
-      setBalance(0)
+      console.error("Balance fetch error", err)
     }
   }
 
@@ -50,7 +54,6 @@ export default function SubscriptionPageContent() {
     if (isConnected && wallet) fetchBalance()
   }, [isConnected, wallet])
 
-  // 1. UPDATED HANDLE SUBSCRIBE
   const handleSubscribe = async () => {
     if (!isConnected || !wallet) {
       setErrorMessage("Please connect your wallet first.");
@@ -63,29 +66,30 @@ export default function SubscriptionPageContent() {
     try {
       const newSessionKey = Keypair.generate();
       const smartWalletStr = (wallet as any).smartWallet;
-      const userPubkeyStr = wallet.publicKey || smartWalletStr;
-      const payerPubkey = new PublicKey(userPubkeyStr);
+      // Use smart wallet as payer/owner
+      const payerPubkey = new PublicKey(smartWalletStr); 
       
       const userUsdcAccount = await getUserUsdcAta(payerPubkey);
       const totalAmountToApprove = SOLANA_CONFIG.getUsdcAmountForMonths(subscriptionMonths);
       
-      // [OPTIMIZATION]: Create instructions immediately (Don't wait for Fetch yet)
+      // 1. Create Funding Instruction (0.005 SOL is enough for many transactions)
       const fundIx = SystemProgram.transfer({
         fromPubkey: payerPubkey,
         toPubkey: newSessionKey.publicKey,
-        lamports: 0.01 * 1_000_000_000, 
+        lamports: 0.005 * 1_000_000_000, 
       });
 
+      // 2. Create Approval Instruction
       const approveIx = createApproveInstruction(
         userUsdcAccount,
         newSessionKey.publicKey,
-        payerPubkey,
+        payerPubkey, // Smart Wallet authorizes
         BigInt(totalAmountToApprove),
       );
 
       console.log("⏳ Saving session key...");
       
-      // Send Key to Backend
+      // 3. Save to Backend
       const saveRes = await fetch("/api/subscription/create", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -105,7 +109,7 @@ export default function SubscriptionPageContent() {
 
       console.log("⏳ Requesting Signature...");
       
-      // [FIX]: Ensure the transaction is sent immediately after
+      // 4. Send Transaction
       const signature = await signAndSendTransaction({
         instructions: [fundIx, approveIx],
       });
@@ -117,16 +121,18 @@ export default function SubscriptionPageContent() {
 
     } catch (err: any) {
       console.error("Subscription error:", err);
-      // Clean up error message for display
-      const msg = err.message?.includes("Transaction is too old") 
-        ? "System Clock Error: Please sync your computer's time and retry." 
-        : err.message;
+      // Nice error message handling
+      let msg = err.message;
+      if (msg.includes("0x1783") || msg.includes("Transaction is too old")) {
+        msg = "Network Lag Error: Please sync your computer clock and try again.";
+      } else if (msg.includes("0x2")) {
+        msg = "Initialization Error: Ensure you have at least 0.01 SOL in your Smart Wallet.";
+      }
       setErrorMessage(msg);
       setStatus("idle");
     }
   };
 
-  // 2. Automated Charge (No changes needed, but ensuring it calls API)
   const handleAutomatedCharge = async () => {
     if (!subscriptionId) {
         setErrorMessage("No active subscription found.");
@@ -155,7 +161,6 @@ export default function SubscriptionPageContent() {
     }
   }
 
-  // Render (Same as before)
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-50">
       <Header />
