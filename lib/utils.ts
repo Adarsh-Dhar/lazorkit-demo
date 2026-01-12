@@ -4,6 +4,8 @@ import { Connection, PublicKey } from '@solana/web3.js'
 import { getAssociatedTokenAddress, getAccount, TOKEN_PROGRAM_ID } from '@solana/spl-token'
 import { SOLANA_CONFIG } from './config'
 
+import type { Transaction } from '@solana/web3.js'
+
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
 }
@@ -51,4 +53,15 @@ export async function checkTokenAccountExists(
   } catch (error) {
     return false
   }
+}
+
+/**
+ * Fetches the latest blockhash and sets it on the transaction.
+ * Call this before signing and sending to avoid TransactionTooOld errors.
+ * @param connection Solana connection
+ * @param transaction The transaction to update
+ */
+export async function setLatestBlockhash(connection: Connection, transaction: Transaction): Promise<void> {
+  const { blockhash } = await connection.getLatestBlockhash('finalized');
+  transaction.recentBlockhash = blockhash;
 }

@@ -9,6 +9,7 @@ import {
 } from "@solana/web3.js";
 import {
   createTransferCheckedInstruction,
+  getAccount,
   TOKEN_PROGRAM_ID,
 } from "@solana/spl-token";
 import { SOLANA_CONFIG, LAZORKIT_CONFIG } from "@/lib/config";
@@ -66,12 +67,34 @@ export async function POST(req: Request) {
     console.log(`   User USDC ATA: ${userUsdcAccount.toString()}`);
     console.log(`   Merchant USDC ATA: ${merchantUsdcAccount.toString()}`);
 
+
     // Calculate USDC amount in smallest units (microUSDC with 6 decimals)
     const usdcAmount = BigInt(Math.round(sub.monthlyRate * Math.pow(10, SOLANA_CONFIG.USDC_DECIMALS)));
+    console.log(`[SPL LOG] Calculated USDC amount for transfer:`, usdcAmount.toString());
+
+
+    // Fetch user's USDC balance before transfer
+    let userAccountInfoBefore;
+    try {
+      userAccountInfoBefore = await getAccount(connection, userUsdcAccount, "confirmed", TOKEN_PROGRAM_ID);
+    } catch (e) {
+      return NextResponse.json({ error: "User USDC account not found or not initialized." }, { status: 400 });
+    }
+    const balanceBefore = userAccountInfoBefore.amount;
+    console.log(`[WALLET LOG] Before USDC balance:`, balanceBefore.toString());
+    console.log(`[WALLET LOG] USDC transfer amount:`, usdcAmount.toString());
+
+
+    // Log transfer instruction details
+    console.log(`[SPL LOG] Creating transferCheckedInstruction with:`);
+    console.log(`  Source: ${userUsdcAccount.toString()}`);
+    console.log(`  Mint: ${SOLANA_CONFIG.USDC_MINT.toString()}`);
+    console.log(`  Destination: ${merchantUsdcAccount.toString()}`);
+    console.log(`  Authority (Session Key): ${sessionKey.publicKey.toString()}`);
+    console.log(`  Amount: ${usdcAmount.toString()}`);
+    console.log(`  Decimals: ${SOLANA_CONFIG.USDC_DECIMALS}`);
 
     // Create the transfer instruction: from USER's USDC account to merchant
-    // The session key acts as a DELEGATE (has approval authority)
-    // Authority (4th param) must be the Session Key (the delegate who can spend)
     const transferIx = createTransferCheckedInstruction(
       userUsdcAccount,          // Source (User's USDC ATA)
       SOLANA_CONFIG.USDC_MINT,  // Mint address
@@ -84,23 +107,43 @@ export async function POST(req: Request) {
     );
 
     const tx = new Transaction().add(transferIx);
-    // Note: For SPL token transfers, we still need someone to pay the SOL fee
-    // The session key can pay if it has a small SOL balance, or use a service wallet
     tx.feePayer = sessionKey.publicKey; // Session key pays the gas fee
 
-    // Get fresh blockhash immediately before signing (prevents "Transaction is too old" error)
-    const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash("confirmed");
+    // Get fresh blockhash immediately before signing
+    const { blockhash } = await connection.getLatestBlockhash("confirmed");
     tx.recentBlockhash = blockhash;
 
-    // Sign with session key (no user interaction needed!)
-    // The session key is authorized via the prior approval
+    // Sign with session key
     tx.sign(sessionKey);
 
     // Send and confirm with fresh blockhash
-    const signature = await sendAndConfirmTransaction(connection, tx, [sessionKey], {
-      commitment: "confirmed",
-      maxRetries: 3,
-    });
+    let signature;
+    try {
+      signature = await sendAndConfirmTransaction(connection, tx, [sessionKey], {
+        commitment: "confirmed",
+        maxRetries: 3,
+      });
+    } catch (err) {
+      console.error("❌ Error sending transaction:", err.message);
+      return NextResponse.json({ error: err.message || "Failed to process charge" }, { status: 500 });
+    }
+
+
+    // Fetch user's USDC balance after transfer
+    let userAccountInfoAfter;
+    try {
+      userAccountInfoAfter = await getAccount(connection, userUsdcAccount, "confirmed", TOKEN_PROGRAM_ID);
+    } catch (e) {
+      return NextResponse.json({ error: "User USDC account not found after transfer." }, { status: 500 });
+    }
+    const balanceAfter = userAccountInfoAfter.amount;
+    console.log(`[WALLET LOG] After USDC balance:`, balanceAfter.toString());
+
+    // Only update chargeHistory and return success if balance decreased by at least usdcAmount
+    if (balanceBefore - balanceAfter < usdcAmount) {
+      console.error("❌ USDC transfer did not complete: balance did not decrease as expected.");
+      return NextResponse.json({ error: "USDC transfer failed or insufficient funds." }, { status: 400 });
+    }
 
     console.log(`✅ USDC charge successful! Signature: ${signature}`);
 

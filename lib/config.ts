@@ -15,7 +15,7 @@ export const SOLANA_CONFIG = {
   // Merchant USDC token account: derive dynamically in runtime via getAssociatedTokenAddress
 
   // Subscription tier: monthly rate in USDC
-  SUBSCRIPTION_MONTHLY_RATE_USDC: 1.0, // 1 USDC per month
+  SUBSCRIPTION_MONTHLY_RATE_USDC: 0.01, // 0.01 USDC per month
   USDC_DECIMALS: 6,
   
   // Legacy SOL config (kept for reference/migration)

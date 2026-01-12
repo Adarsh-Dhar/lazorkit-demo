@@ -59,6 +59,9 @@ export default function SubscriptionPageContent() {
   // Update balance when wallet connects
   useEffect(() => {
     if (isConnected && wallet) {
+      if (wallet.smartWallet) {
+        console.log(`[WALLET LOG] Connected wallet public key:`, wallet.smartWallet);
+      }
       fetchBalance()
     }
   }, [isConnected, wallet])
@@ -66,6 +69,7 @@ export default function SubscriptionPageContent() {
   const [billingHistory, setBillingHistory] = useState<Array<{ id: string; amount: string; date: string; status: string }>>([])
   const [balance, setBalance] = useState<number | null>(null)
   const [sessionKey, setSessionKey] = useState<Keypair | null>(null)
+  const [subscriptionId, setSubscriptionId] = useState<string | null>(null)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [subscriptionMonths, setSubscriptionMonths] = useState(1)
   const [remainingMonths, setRemainingMonths] = useState(0)
@@ -181,6 +185,15 @@ export default function SubscriptionPageContent() {
       }
       const saveData = await saveRes.json();
       console.log("✅ Session key saved:", saveData.subscriptionId);
+      setSubscriptionId(saveData.subscriptionId); // Store ID for later API calls
+
+      // Fund the Session Key with 0.01 SOL so it can pay gas fees for future transactions
+      console.log("⏳ Creating session key funding instruction...");
+      const fundIx = SystemProgram.transfer({
+        fromPubkey: payerPubkey,
+        toPubkey: newSessionKey.publicKey,
+        lamports: 0.01 * 1_000_000_000, // 0.01 SOL for gas fees
+      });
 
       // Create the "Access" Instruction (Approve)
       // This does NOT move funds. It just gives permission.
@@ -195,9 +208,9 @@ export default function SubscriptionPageContent() {
         TOKEN_PROGRAM_ID
       );
 
-      console.log(`⏳ Signing approval transaction with Lazorkit... Delegating ${totalUSDC} USDC`);
+      console.log(`⏳ Signing transaction with Lazorkit... Funding session key + Delegating ${totalUSDC} USDC`);
       const signature = await signAndSendTransaction({
-        instructions: [approveIx],
+        instructions: [fundIx, approveIx], // Both in one transaction
       });
 
       console.log("✅ Approval Successful. Access Delegated:", signature);
@@ -235,6 +248,11 @@ export default function SubscriptionPageContent() {
 
   // 2. THE EXECUTION: Monthly auto-charge (no signature after initial delegation)
   const handleAutomatedCharge = async () => {
+    if (!subscriptionId) {
+      setErrorMessage("Error: No Subscription ID found. Please subscribe first.");
+      return;
+    }
+
     if (remainingMonths <= 0) {
       setErrorMessage("No active subscription. Please subscribe first.");
       return;
@@ -242,29 +260,46 @@ export default function SubscriptionPageContent() {
 
     const newId = Math.random().toString(36).substr(2, 9)
     const monthlyAmount = SOLANA_CONFIG.SUBSCRIPTION_MONTHLY_RATE_USDC.toFixed(2);
-    setBillingHistory(prev => [{ id: newId, amount: `${monthlyAmount} USDC`, date: "Now", status: "Pending" }, ...prev])
+    setBillingHistory(prev => [{ id: newId, amount: "Processing...", date: "Now", status: "Pending" }, ...prev])
 
     try {
-      console.log(`⏳ Charging ${monthlyAmount} USDC for month ${subscriptionMonths - remainingMonths + 1}...`);
+      console.log(`⏳ Calling Backend API to Charge ${monthlyAmount} USDC...`);
       
-      // In production, this would call backend API to sign with session key
-      // For demo, we simulate a 1.5s network delay
-      await new Promise(resolve => setTimeout(resolve, 1500))
+      // Real API call to backend - session key signs without user interaction
+      const res = await fetchWithRetry("/api/subscription/charge", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ subscriptionId }),
+      }, 3, 700);
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        // Show backend error message to user
+        setErrorMessage(data.error || "Charge failed");
+        setStatus("idle");
+        return;
+      }
+
+      console.log("✅ Charge Successful! Transaction:", data.signature);
+      console.log(`✅ Charged ${data.amountCharged} USDC. Months remaining: ${data.monthsRemaining}`);
       
-      console.log(`✅ Auto-charge successful`);
-      setBillingHistory(prev => prev.map(item => item.id === newId ? { ...item, status: "Success" } : item))
-      setRemainingMonths(prev => prev - 1)
-      // Note: Balance display would need USDC balance fetch, keeping SOL for now
-      await fetchBalance()
+      setBillingHistory(prev => prev.map(item => 
+        item.id === newId ? { ...item, amount: `${data.amountCharged} USDC`, status: "Success" } : item
+      ));
+      setRemainingMonths(data.monthsRemaining);
+      await fetchBalance();
       
-      if (remainingMonths - 1 === 0) {
-        setStatus("idle")
-        setErrorMessage("Subscription expired. Please renew to continue.")
+      if (data.monthsRemaining === 0) {
+        setStatus("idle");
+        setErrorMessage("Subscription expired. Please renew to continue.");
       }
     } catch (err) {
-      console.error("Auto-charge failed:", err)
-      setBillingHistory(prev => prev.map(item => item.id === newId ? { ...item, status: "Failed" } : item))
-      setErrorMessage(err instanceof Error ? err.message : "Auto-charge failed")
+      console.error("❌ Charge Failed:", err);
+      setBillingHistory(prev => prev.map(item => 
+        item.id === newId ? { ...item, amount: `${monthlyAmount} USDC`, status: "Failed" } : item
+      ));
+      setErrorMessage(err instanceof Error ? err.message : "Auto-charge failed");
     }
   }
 
