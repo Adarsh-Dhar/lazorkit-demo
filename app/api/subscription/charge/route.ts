@@ -7,7 +7,12 @@ import {
   Transaction,
   sendAndConfirmTransaction,
 } from "@solana/web3.js";
+import {
+  createTransferCheckedInstruction,
+  TOKEN_PROGRAM_ID,
+} from "@solana/spl-token";
 import { SOLANA_CONFIG, LAZORKIT_CONFIG } from "@/lib/config";
+import { getUserUsdcAta, getMerchantUsdcAta } from "@/lib/utils";
 import { subscriptions } from "../create/route";
 
 export async function POST(req: Request) {
@@ -42,27 +47,44 @@ export async function POST(req: Request) {
       );
     }
 
-    // Reconstruct session key from stored secret
+    // Reconstruct session key from stored secret (acts as delegate)
     const sessionKey = Keypair.fromSecretKey(new Uint8Array(sub.sessionKeySecret));
     const userWallet = new PublicKey(sub.userAddress);
     const merchantWallet = SOLANA_CONFIG.MERCHANT_WALLET;
 
-    console.log(`⏳ Processing charge for subscription ${subscriptionId}...`);
-    console.log(`   Session Key Account: ${sessionKey.publicKey.toString()}`);
+    console.log(`⏳ Processing USDC charge for subscription ${subscriptionId}...`);
+    console.log(`   Session Key (Delegate): ${sessionKey.publicKey.toString()}`);
+    console.log(`   User Wallet: ${userWallet.toString()}`);
     console.log(`   Merchant: ${merchantWallet.toString()}`);
-    console.log(`   Amount: ${sub.monthlyRate} SOL`);
+    console.log(`   Amount: ${sub.monthlyRate} USDC`);
 
-    // Create the transfer instruction: from session key to merchant
+    // Get USDC token accounts
     const connection = new Connection(LAZORKIT_CONFIG.rpc, "confirmed");
-    const lamports = Math.round(sub.monthlyRate * Math.pow(10, 9));
+    const userUsdcAccount = new PublicKey(sub.userUsdcAccount);
+    const merchantUsdcAccount = await getMerchantUsdcAta();
 
-    const transferIx = SystemProgram.transfer({
-      fromPubkey: sessionKey.publicKey, // Transfer FROM session key account
-      toPubkey: merchantWallet, // Transfer TO merchant
-      lamports,
-    });
+    console.log(`   User USDC ATA: ${userUsdcAccount.toString()}`);
+    console.log(`   Merchant USDC ATA: ${merchantUsdcAccount.toString()}`);
+
+    // Calculate USDC amount in smallest units (microUSDC with 6 decimals)
+    const usdcAmount = BigInt(Math.round(sub.monthlyRate * Math.pow(10, SOLANA_CONFIG.USDC_DECIMALS)));
+
+    // Create the transfer instruction: from USER's USDC account to merchant
+    // The session key acts as a DELEGATE (signs for the user)
+    const transferIx = createTransferCheckedInstruction(
+      userUsdcAccount,          // Source (User's USDC ATA)
+      SOLANA_CONFIG.USDC_MINT,  // Mint address
+      merchantUsdcAccount,      // Destination (Merchant's USDC ATA)
+      sessionKey.publicKey,     // Owner/Delegate (Session key signs)
+      usdcAmount,               // Amount in smallest units
+      SOLANA_CONFIG.USDC_DECIMALS, // Decimals
+      [],                       // Multi-signers
+      TOKEN_PROGRAM_ID
+    );
 
     const tx = new Transaction().add(transferIx);
+    // Note: For SPL token transfers, we still need someone to pay the SOL fee
+    // The session key can pay if it has a small SOL balance, or use a service wallet
     tx.feePayer = sessionKey.publicKey; // Session key pays the gas fee
 
     // Get fresh blockhash immediately before signing (prevents "Transaction is too old" error)
@@ -70,6 +92,7 @@ export async function POST(req: Request) {
     tx.recentBlockhash = blockhash;
 
     // Sign with session key (no user interaction needed!)
+    // The session key is authorized via the prior approval
     tx.sign(sessionKey);
 
     // Send and confirm with fresh blockhash
@@ -78,7 +101,7 @@ export async function POST(req: Request) {
       maxRetries: 3,
     });
 
-    console.log(`✅ Charge successful! Signature: ${signature}`);
+    console.log(`✅ USDC charge successful! Signature: ${signature}`);
 
     // Update subscription record
     sub.chargeHistory.push({

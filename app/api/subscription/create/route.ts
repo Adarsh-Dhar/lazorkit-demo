@@ -6,9 +6,11 @@ const subscriptions = new Map<
   {
     id: string;
     userAddress: string;
+    userUsdcAccount: string;
     sessionKeySecret: number[];
     monthsPrepaid: number;
     monthlyRate: number;
+    approvedAmount: number;
     createdAt: number;
     nextChargeDate: number;
     chargeHistory: Array<{ date: number; amount: number; signature?: string; status: string }>;
@@ -18,19 +20,19 @@ const subscriptions = new Map<
 export async function POST(req: Request) {
   try {
     const body = await req.json();
-    const { userAddress, sessionKeySecret, monthsPrepaid, monthlyRate } = body;
+    const { userAddress, userUsdcAccount, sessionKeySecret, monthsPrepaid, monthlyRate, approvedAmount } = body;
 
     // Validate input
-    if (!userAddress || !sessionKeySecret || !Array.isArray(sessionKeySecret)) {
+    if (!userAddress || !userUsdcAccount || !sessionKeySecret || !Array.isArray(sessionKeySecret)) {
       return NextResponse.json(
-        { error: "Invalid request: userAddress and sessionKeySecret required" },
+        { error: "Invalid request: userAddress, userUsdcAccount, and sessionKeySecret required" },
         { status: 400 }
       );
     }
 
-    if (!monthsPrepaid || !monthlyRate) {
+    if (!monthsPrepaid || !monthlyRate || !approvedAmount) {
       return NextResponse.json(
-        { error: "Invalid request: monthsPrepaid and monthlyRate required" },
+        { error: "Invalid request: monthsPrepaid, monthlyRate, and approvedAmount required" },
         { status: 400 }
       );
     }
@@ -38,13 +40,15 @@ export async function POST(req: Request) {
     // Create subscription ID
     const subscriptionId = `sub_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 
-    // Store subscription with session key secret
+    // Store subscription with session key secret and USDC details
     subscriptions.set(subscriptionId, {
       id: subscriptionId,
       userAddress,
+      userUsdcAccount,
       sessionKeySecret,
       monthsPrepaid,
       monthlyRate,
+      approvedAmount,
       createdAt: Date.now(),
       nextChargeDate: Date.now() + 30 * 24 * 60 * 60 * 1000, // 30 days from now
       chargeHistory: [

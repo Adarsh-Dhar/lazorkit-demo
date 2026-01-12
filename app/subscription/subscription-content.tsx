@@ -8,12 +8,18 @@ import {
   Connection,
   SystemProgram,
 } from "@solana/web3.js"
+import {
+  createApproveInstruction,
+  getAssociatedTokenAddress,
+  TOKEN_PROGRAM_ID,
+} from "@solana/spl-token"
 import Header from "@/components/header"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Loader2, CheckCircle2, Zap, RefreshCw, AlertCircle } from "lucide-react"
 import { SOLANA_CONFIG, LAZORKIT_CONFIG } from "@/lib/config"
+import { getUserUsdcAta, checkTokenAccountExists } from "@/lib/utils"
 
 
 export default function SubscriptionPageContent() {
@@ -26,7 +32,7 @@ export default function SubscriptionPageContent() {
 
   const [status, setStatus] = useState<"idle" | "authorizing" | "active">("idle")
 
-  // Fetch real SOL balance when wallet connects
+  // Fetch real USDC balance when wallet connects
   const fetchBalance = async () => {
     if (!wallet) return
     try {
@@ -34,11 +40,19 @@ export default function SubscriptionPageContent() {
       const smartWalletStr = (wallet as any).smartWallet
       if (smartWalletStr) {
         const smartWalletPubkey = new PublicKey(smartWalletStr)
-        const lamports = await connection.getBalance(smartWalletPubkey)
-        setBalance(lamports / 1e9) // Convert lamports to SOL
+        const userUsdcAccount = await getUserUsdcAta(smartWalletPubkey)
+        try {
+          const accountInfo = await connection.getTokenAccountBalance(userUsdcAccount, "confirmed")
+          const usdcBalance = parseFloat(accountInfo.value.amount) / Math.pow(10, SOLANA_CONFIG.USDC_DECIMALS)
+          setBalance(usdcBalance)
+        } catch (err) {
+          // Account may not exist or no USDC yet
+          console.log("USDC account not found or empty", err)
+          setBalance(0)
+        }
       }
     } catch (err) {
-      console.error("Failed to fetch balance:", err)
+      console.error("Failed to fetch USDC balance:", err)
     }
   }
 
@@ -55,6 +69,35 @@ export default function SubscriptionPageContent() {
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [subscriptionMonths, setSubscriptionMonths] = useState(1)
   const [remainingMonths, setRemainingMonths] = useState(0)
+
+  // Optional: configure API base URL (useful when tunneling via ngrok)
+  const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || ""
+
+  // Simple fetch with retry for transient 502/503/504 errors from tunnels or edge
+  const fetchWithRetry = async (
+    path: string,
+    init: RequestInit,
+    retries = 3,
+    backoffMs = 700
+  ): Promise<Response> => {
+    const url = path.startsWith("http") ? path : `${API_BASE_URL}${path}`
+    let lastErr: any
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      try {
+        const res = await fetch(url, init)
+        // Retry on transient upstream errors
+        if ([502, 503, 504].includes(res.status)) {
+          throw new Error(`Upstream error ${res.status} ${res.statusText}`)
+        }
+        return res
+      } catch (err) {
+        lastErr = err
+        if (attempt === retries) break
+        await new Promise(r => setTimeout(r, backoffMs * Math.pow(2, attempt)))
+      }
+    }
+    throw lastErr
+  }
 
   // 1. THE SETUP: User delegates authority (Signs 1 time with Passkey)
   const handleSubscribe = async () => {
@@ -91,49 +134,78 @@ export default function SubscriptionPageContent() {
       console.log("✅ Payer PublicKey (Signer):", payerPubkey.toString());
       console.log("✅ Merchant PublicKey:", merchantPubkey.toString());
 
-      // SAVE SESSION KEY TO BACKEND BEFORE TRANSACTION
+      // Get the User's USDC Token Account (ATA)
+      console.log("⏳ Getting user USDC token account...");
+      const connection = new Connection(LAZORKIT_CONFIG.rpc, "confirmed");
+      const userUsdcAccount = await getUserUsdcAta(payerPubkey);
+      console.log("✅ User USDC ATA:", userUsdcAccount.toString());
+
+      // Check if the user's USDC account exists
+      const accountExists = await checkTokenAccountExists(connection, userUsdcAccount);
+      if (!accountExists) {
+        throw new Error(
+          "Your USDC token account doesn't exist. Please create it first by receiving some devnet USDC. " +
+          "Visit https://faucet.circle.com/ or use a Solana faucet to get devnet USDC."
+        );
+      }
+      console.log("✅ USDC token account verified");
+
+      // Calculate Total Allowance (Approval Limit)
+      // We approve the TOTAL amount for all months upfront.
+      // The backend will only pull 1 month at a time.
+      const totalAmountToApprove = SOLANA_CONFIG.getUsdcAmountForMonths(subscriptionMonths);
+      const totalUSDC = SOLANA_CONFIG.getTotalUsdcForMonths(subscriptionMonths);
+      console.log(`⏳ Approving delegation for ${totalUSDC} USDC (${subscriptionMonths} months)...`);
+
+      // SAVE SESSION KEY TO BACKEND BEFORE APPROVAL
       console.log("⏳ Saving session key to backend...");
-      const saveRes = await fetch("/api/subscription/create", {
+      const saveRes = await fetchWithRetry("/api/subscription/create", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           userAddress: payerPubkey.toString(),
+          userUsdcAccount: userUsdcAccount.toString(),
           sessionKeySecret: Array.from(newSessionKey.secretKey),
           monthsPrepaid: subscriptionMonths,
-          monthlyRate: SOLANA_CONFIG.SUBSCRIPTION_MONTHLY_RATE_SOL,
+          monthlyRate: SOLANA_CONFIG.SUBSCRIPTION_MONTHLY_RATE_USDC,
+          approvedAmount: totalAmountToApprove,
         }),
-      });
+      }, 3, 700);
       if (!saveRes.ok) {
-        throw new Error(`Failed to save session key: ${saveRes.statusText}`);
+        let extra = ""
+        try {
+          const t = await saveRes.text()
+          extra = t ? ` | ${t}` : ""
+        } catch {}
+        throw new Error(`Failed to save session key: ${saveRes.status} ${saveRes.statusText}${extra}`)
       }
       const saveData = await saveRes.json();
       console.log("✅ Session key saved:", saveData.subscriptionId);
 
-      // C. Fund the session key account with total prepaid amount
-      // This is a one-time payment; the session key will be used for monthly deductions
-      console.log("⏳ Creating SOL transfer to session key account for", subscriptionMonths, "months...");
-      const connection = new Connection(LAZORKIT_CONFIG.rpc, "confirmed");
-      const totalLamports = SOLANA_CONFIG.getLamportsForMonths(subscriptionMonths);
-      const totalSOL = SOLANA_CONFIG.getTotalForMonths(subscriptionMonths);
-      
-      // Transfer total prepaid amount to the session key account (not merchant)
-      const transferIx = SystemProgram.transfer({
-        fromPubkey: payerPubkey,
-        toPubkey: newSessionKey.publicKey, // Fund the session key, not merchant
-        lamports: totalLamports,
-      });
+      // Create the "Access" Instruction (Approve)
+      // This does NOT move funds. It just gives permission.
+      // The session key can now spend up to totalAmountToApprove from the user's USDC account.
+      console.log("⏳ Creating approval instruction...");
+      const approveIx = createApproveInstruction(
+        userUsdcAccount,          // Account to spend from (User's USDC ATA)
+        newSessionKey.publicKey,  // Delegate who can spend (The Session Key)
+        payerPubkey,              // Owner (The User)
+        BigInt(totalAmountToApprove),     // Max amount they can take (as BigInt for SPL token)
+        [],                       // Multi-signers (none)
+        TOKEN_PROGRAM_ID
+      );
 
-      console.log(`⏳ Signing transaction with Lazorkit... Funding session key with ${totalSOL} SOL`);
+      console.log(`⏳ Signing approval transaction with Lazorkit... Delegating ${totalUSDC} USDC`);
       const signature = await signAndSendTransaction({
-        instructions: [transferIx],
+        instructions: [approveIx],
       });
 
-      console.log("✅ Session key funded:", signature);
-      console.log("🔑 Session Key PublicKey:", newSessionKey.publicKey.toString());
+      console.log("✅ Approval Successful. Access Delegated:", signature);
+      console.log("🔑 Session Key PublicKey (Delegate):", newSessionKey.publicKey.toString());
       setSessionKey(newSessionKey);
       setRemainingMonths(subscriptionMonths);
       setStatus("active");
-      addBillingRecord(`Subscribed for ${subscriptionMonths} month${subscriptionMonths > 1 ? 's' : ''}`);
+      addBillingRecord(`Subscribed for ${subscriptionMonths} month${subscriptionMonths > 1 ? 's' : ''} - ${totalUSDC} USDC approved`);
       // Refresh balance after successful transaction
       await fetchBalance();
       setErrorMessage(null);
@@ -169,11 +241,11 @@ export default function SubscriptionPageContent() {
     }
 
     const newId = Math.random().toString(36).substr(2, 9)
-    const monthlyAmount = SOLANA_CONFIG.SUBSCRIPTION_MONTHLY_RATE_SOL.toFixed(2);
-    setBillingHistory(prev => [{ id: newId, amount: `${monthlyAmount} SOL`, date: "Now", status: "Pending" }, ...prev])
+    const monthlyAmount = SOLANA_CONFIG.SUBSCRIPTION_MONTHLY_RATE_USDC.toFixed(2);
+    setBillingHistory(prev => [{ id: newId, amount: `${monthlyAmount} USDC`, date: "Now", status: "Pending" }, ...prev])
 
     try {
-      console.log(`⏳ Charging ${monthlyAmount} SOL for month ${subscriptionMonths - remainingMonths + 1}...`);
+      console.log(`⏳ Charging ${monthlyAmount} USDC for month ${subscriptionMonths - remainingMonths + 1}...`);
       
       // In production, this would call backend API to sign with session key
       // For demo, we simulate a 1.5s network delay
@@ -182,7 +254,7 @@ export default function SubscriptionPageContent() {
       console.log(`✅ Auto-charge successful`);
       setBillingHistory(prev => prev.map(item => item.id === newId ? { ...item, status: "Success" } : item))
       setRemainingMonths(prev => prev - 1)
-      setBalance(prev => prev !== null ? prev - SOLANA_CONFIG.SUBSCRIPTION_MONTHLY_RATE_SOL : null)
+      // Note: Balance display would need USDC balance fetch, keeping SOL for now
       await fetchBalance()
       
       if (remainingMonths - 1 === 0) {
@@ -200,7 +272,7 @@ export default function SubscriptionPageContent() {
     setBillingHistory(prev => [
       {
         id: Math.random().toString(36).substr(2, 9),
-        amount: "0.01 SOL",
+        amount: `${SOLANA_CONFIG.SUBSCRIPTION_MONTHLY_RATE_USDC} USDC`,
         date: new Date().toLocaleDateString(),
         status: "Success"
       },
@@ -219,7 +291,7 @@ export default function SubscriptionPageContent() {
           <h1 className="text-4xl font-bold tracking-tight">Smart Subscriptions with Lazorkit</h1>
           <p className="text-lg text-slate-500 max-w-2xl mx-auto">
             Real passkey-based gasless subscriptions using <strong>Delegated Authority</strong>. 
-            Sign once with FaceID/Passkey, and your session key handles monthly SOL payments automatically.
+            Sign once with FaceID/Passkey to approve USDC spending, and your session key handles monthly payments automatically.
           </p>
         </div>
 
@@ -266,17 +338,17 @@ export default function SubscriptionPageContent() {
                     </div>
                     
                     <div className="p-4 bg-blue-50 dark:bg-blue-900/20 rounded-lg border border-blue-200 dark:border-blue-800">
-                      <p className="text-sm text-slate-600 dark:text-slate-400">Upfront Prepayment</p>
-                      <p className="text-3xl font-bold text-blue-600 dark:text-blue-400">{SOLANA_CONFIG.getTotalForMonths(subscriptionMonths).toFixed(3)} SOL</p>
-                      <p className="text-xs text-slate-500 dark:text-slate-400 mt-2">Funds session key account for {subscriptionMonths} month{subscriptionMonths > 1 ? 's' : ''}</p>
-                      <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">Monthly charge: 0.01 SOL (automated, no signature)</p>
+                      <p className="text-sm text-slate-600 dark:text-slate-400">Upfront Approval Limit</p>
+                      <p className="text-3xl font-bold text-blue-600 dark:text-blue-400">{SOLANA_CONFIG.getTotalUsdcForMonths(subscriptionMonths).toFixed(2)} USDC</p>
+                      <p className="text-xs text-slate-500 dark:text-slate-400 mt-2">Approve spending limit for {subscriptionMonths} month{subscriptionMonths > 1 ? 's' : ''}</p>
+                      <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">Monthly charge: {SOLANA_CONFIG.SUBSCRIPTION_MONTHLY_RATE_USDC} USDC (automated, no signature)</p>
                     </div>
                   </div>
 
                   <ul className="space-y-2 text-sm text-slate-600 dark:text-slate-400">
                     <li className="flex items-center gap-2"><CheckCircle2 className="w-4 h-4 text-green-500"/> Sign once with Passkey/FaceID</li>
-                    <li className="flex items-center gap-2"><CheckCircle2 className="w-4 h-4 text-green-500"/> Fund session key with prepaid amount</li>
-                    <li className="flex items-center gap-2"><CheckCircle2 className="w-4 h-4 text-green-500"/> Auto-charge 0.01 SOL monthly (no signature)</li>
+                    <li className="flex items-center gap-2"><CheckCircle2 className="w-4 h-4 text-green-500"/> Approve USDC spending limit (funds stay in your wallet)</li>
+                    <li className="flex items-center gap-2"><CheckCircle2 className="w-4 h-4 text-green-500"/> Auto-charge {SOLANA_CONFIG.SUBSCRIPTION_MONTHLY_RATE_USDC} USDC monthly (no signature)</li>
                     <li className="flex items-center gap-2"><CheckCircle2 className="w-4 h-4 text-green-500"/> Cancel anytime</li>
                   </ul>
 
@@ -297,7 +369,7 @@ export default function SubscriptionPageContent() {
                     </p>
                     <p className="text-2xl font-bold text-green-700 dark:text-green-400 mt-2">{remainingMonths} months remaining</p>
                     <p className="text-xs text-green-600/80 mt-2">
-                      Next auto-charge: 0.01 SOL <br/>
+                      Next auto-charge: {SOLANA_CONFIG.SUBSCRIPTION_MONTHLY_RATE_USDC} USDC <br/>
                       Session Key: <span className="font-mono">{sessionKey?.publicKey.toString().slice(0, 16)}...</span>
                     </p>
                   </div>
@@ -310,7 +382,8 @@ export default function SubscriptionPageContent() {
           <div className="space-y-4">
              <div className="flex justify-between items-center px-1">
                 <h3 className="font-semibold text-slate-900 dark:text-white">Transaction History</h3>
-                <div className="text-sm text-slate-500">Wallet Balance: <span className="font-mono text-slate-900 dark:text-white">{balance !== null ? `${balance.toFixed(4)} SOL` : 'Loading...'}</span></div>
+                <div className="text-sm text-slate-500">USDC Balance: <span className="font-mono text-slate-900 dark:text-white">{balance !== null ? `${balance.toFixed(2)} USDC` : 'Loading...'}</span></div>
+                <div className="text-xs text-slate-500 mt-1">Approval costs a small SOL network fee; no USDC moves until monthly charge.</div>
              </div>
              
              <div className="space-y-3">

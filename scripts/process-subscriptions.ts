@@ -20,15 +20,22 @@ import {
   Transaction,
   sendAndConfirmTransaction,
 } from "@solana/web3.js";
+import {
+  createTransferCheckedInstruction,
+  TOKEN_PROGRAM_ID,
+} from "@solana/spl-token";
 import { SOLANA_CONFIG, LAZORKIT_CONFIG } from "../lib/config";
+import { getMerchantUsdcAta } from "../lib/utils";
 
 // Demo: In-memory subscription store (replace with real DB in production)
 interface Subscription {
   id: string;
   userAddress: string;
+  userUsdcAccount: string;
   sessionKeySecret: number[];
   monthsPrepaid: number;
   monthlyRate: number;
+  approvedAmount: number;
   createdAt: number;
   nextChargeDate: number;
   chargeHistory: Array<{
@@ -73,24 +80,41 @@ async function processSubscriptions() {
 
       console.log(`\n📝 Processing subscription: ${subId}`);
       console.log(`   User: ${sub.userAddress}`);
-      console.log(`   Amount: ${sub.monthlyRate} SOL`);
+      console.log(`   Amount: ${sub.monthlyRate} USDC`);
       console.log(`   Months Remaining: ${sub.monthsPrepaid}`);
 
-      // Reconstruct session key
+      // Reconstruct session key (acts as delegate)
       const sessionKey = Keypair.fromSecretKey(new Uint8Array(sub.sessionKeySecret));
       const userWallet = new PublicKey(sub.userAddress);
+      const userUsdcAccount = new PublicKey(sub.userUsdcAccount);
       const merchantWallet = SOLANA_CONFIG.MERCHANT_WALLET;
 
-      // Create transfer instruction: from session key account to merchant
-      const lamports = Math.round(sub.monthlyRate * Math.pow(10, 9));
+      // Get merchant's USDC ATA (pre-computed from MERCHANT_WALLET + USDC_MINT)
+      // In production, you might want to compute this dynamically
+      const merchantUsdcAccount = await getMerchantUsdcAta();
 
-      const transferIx = SystemProgram.transfer({
-        fromPubkey: sessionKey.publicKey, // Transfer FROM session key account
-        toPubkey: merchantWallet, // Transfer TO merchant
-        lamports,
-      });
+      console.log(`   User USDC ATA: ${userUsdcAccount.toString()}`);
+      console.log(`   Merchant USDC ATA: ${merchantUsdcAccount.toString()}`);
+
+      // Calculate USDC amount in smallest units (microUSDC with 6 decimals)
+      const usdcAmount = BigInt(Math.round(sub.monthlyRate * Math.pow(10, SOLANA_CONFIG.USDC_DECIMALS)));
+
+      // Create transfer instruction: from USER's USDC account to merchant
+      // The session key acts as a DELEGATE (signs for the user)
+      const transferIx = createTransferCheckedInstruction(
+        userUsdcAccount,          // Source (User's USDC ATA)
+        SOLANA_CONFIG.USDC_MINT,  // Mint address
+        merchantUsdcAccount,      // Destination (Merchant's USDC ATA)
+        sessionKey.publicKey,     // Owner/Delegate (Session key signs)
+        usdcAmount,               // Amount in smallest units
+        SOLANA_CONFIG.USDC_DECIMALS, // Decimals
+        [],                       // Multi-signers
+        TOKEN_PROGRAM_ID
+      );
 
       const tx = new Transaction().add(transferIx);
+      // Note: Session key needs a small SOL balance to pay transaction fees
+      // Alternatively, use a service wallet as fee payer
       tx.feePayer = sessionKey.publicKey; // Session key pays gas fee
 
       // Get fresh blockhash immediately before signing
@@ -101,13 +125,13 @@ async function processSubscriptions() {
       tx.sign(sessionKey);
 
       // Send and confirm with retries
-      console.log(`⏳ Sending transaction...`);
+      console.log(`⏳ Sending USDC transfer transaction...`);
       const signature = await sendAndConfirmTransaction(connection, tx, [sessionKey], {
         commitment: "confirmed",
         maxRetries: 3,
       });
 
-      console.log(`✅ Charge successful!`);
+      console.log(`✅ USDC charge successful!`);
       console.log(`   Signature: ${signature}`);
 
       // Update subscription
@@ -147,7 +171,7 @@ async function processSubscriptions() {
   console.log(`   Total subscriptions: ${subscriptions.size}`);
   console.log(`   Processed: ${processedCount}`);
   console.log(`   Errors: ${errorCount}`);
-  console.log(`✅ Subscription processor completed at ${new Date().toISOString()}`);
+  console.log(`✅ Subscription processor (USDC delegation) completed at ${new Date().toISOString()}`);
 }
 
 // Main entry point

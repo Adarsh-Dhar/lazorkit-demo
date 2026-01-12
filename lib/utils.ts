@@ -1,6 +1,54 @@
 import { clsx, type ClassValue } from 'clsx'
 import { twMerge } from 'tailwind-merge'
+import { Connection, PublicKey } from '@solana/web3.js'
+import { getAssociatedTokenAddress, getAccount, TOKEN_PROGRAM_ID } from '@solana/spl-token'
+import { SOLANA_CONFIG } from './config'
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
+}
+
+/**
+ * Get the user's USDC Associated Token Account address
+ * @param userPublicKey The user's wallet public key
+ * @returns The ATA address for USDC
+ */
+export async function getUserUsdcAta(userPublicKey: PublicKey): Promise<PublicKey> {
+  return getAssociatedTokenAddress(
+    SOLANA_CONFIG.USDC_MINT,
+    userPublicKey,
+    true, // allowOwnerOffCurve - smart wallets may use off-curve keys
+    TOKEN_PROGRAM_ID
+  )
+}
+
+/**
+ * Get the merchant's USDC Associated Token Account address
+ * @returns The ATA address for merchant's USDC
+ */
+export async function getMerchantUsdcAta(): Promise<PublicKey> {
+  return getAssociatedTokenAddress(
+    SOLANA_CONFIG.USDC_MINT,
+    SOLANA_CONFIG.MERCHANT_WALLET,
+    true, // allowOwnerOffCurve
+    TOKEN_PROGRAM_ID
+  )
+}
+
+/**
+ * Check if a token account exists and is initialized
+ * @param connection Solana connection
+ * @param tokenAccount The token account address to check
+ * @returns true if account exists and is initialized
+ */
+export async function checkTokenAccountExists(
+  connection: Connection,
+  tokenAccount: PublicKey
+): Promise<boolean> {
+  try {
+    await getAccount(connection, tokenAccount, 'confirmed', TOKEN_PROGRAM_ID)
+    return true
+  } catch (error) {
+    return false
+  }
 }
