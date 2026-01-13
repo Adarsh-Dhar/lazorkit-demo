@@ -31,6 +31,7 @@ export default function SubscriptionPageContent() {
   const [subscriptionMonths, setSubscriptionMonths] = useState(1)
   const [remainingMonths, setRemainingMonths] = useState(0)
   const [billingHistory, setBillingHistory] = useState<Array<{ id: string; amount: string; date: string; status: string }>>([])
+  const [sessionKey, setSessionKey] = useState<Keypair | null>(null)
 
   // Helper to fetch balance
   const fetchBalance = async () => {
@@ -82,53 +83,26 @@ export default function SubscriptionPageContent() {
     setErrorMessage(null);
 
     try {
-      const newSessionKey = Keypair.generate();
-      const smartWalletStr = (wallet as any).smartWallet;
-      // Use smart wallet as payer/owner
-      const payerPubkey = new PublicKey(smartWalletStr);
-
-      // Debug: Print smart wallet address and SOL balance
-      if (LAZORKIT_CONFIG.rpc) {
-        const connection = new Connection(LAZORKIT_CONFIG.rpc, "confirmed");
-        const solBalance = await connection.getBalance(payerPubkey, "confirmed");
-        console.log("Smart Wallet Address:", payerPubkey.toString());
-        console.log("Smart Wallet SOL Balance:", solBalance / 1_000_000_000, "SOL");
+      // Only generate a new session key if not already present
+      let currentSessionKey = sessionKey;
+      if (!currentSessionKey) {
+        currentSessionKey = Keypair.generate();
+        setSessionKey(currentSessionKey);
       }
 
-
+      const smartWalletStr = (wallet as any).smartWallet;
+      const payerPubkey = new PublicKey(smartWalletStr);
       const userUsdcAccount = await getUserUsdcAta(payerPubkey);
       const totalAmountToApprove = SOLANA_CONFIG.getUsdcAmountForMonths(subscriptionMonths);
 
-      // Debug: Print USDC token account address and balance
-      if (LAZORKIT_CONFIG.rpc) {
-        const connection = new Connection(LAZORKIT_CONFIG.rpc, "confirmed");
-        try {
-          const usdcBalance = await connection.getTokenAccountBalance(userUsdcAccount, "confirmed");
-          console.log("USDC Token Account:", userUsdcAccount.toString());
-          console.log("USDC Token Balance:", usdcBalance.value.uiAmount, "USDC");
-        } catch (e) {
-          console.log("USDC Token Account does not exist or is not initialized:", userUsdcAccount.toString());
-        }
-      }
-
-      // Only create SPL token approval instruction (no SOL transfer)
-      const approveIx = createApproveInstruction(
-        userUsdcAccount,
-        newSessionKey.publicKey,
-        payerPubkey, // Smart Wallet authorizes
-        BigInt(totalAmountToApprove),
-      );
-
-      console.log("⏳ Saving session key...");
-
-      // Save to Backend
+      // Save session key and subscription info to backend
       const saveRes = await fetch("/api/subscription/create", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           userAddress: payerPubkey.toString(),
           userUsdcAccount: userUsdcAccount.toString(),
-          sessionKeySecret: Array.from(newSessionKey.secretKey),
+          sessionKeySecret: Array.from(currentSessionKey.secretKey),
           monthsPrepaid: subscriptionMonths,
           monthlyRate: SOLANA_CONFIG.SUBSCRIPTION_MONTHLY_RATE_USDC,
           approvedAmount: totalAmountToApprove,
@@ -139,28 +113,26 @@ export default function SubscriptionPageContent() {
       const saveData = await saveRes.json();
       setSubscriptionId(saveData.subscriptionId);
 
-      console.log("⏳ Requesting Signature...");
-
-      // Only send SPL token approval instruction
-      const signature = await signAndSendTransaction({
-        instructions: [approveIx],
+      // Ask backend to send approval transaction
+      const approveRes = await fetch("/api/subscription/approve", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          subscriptionId: saveData.subscriptionId,
+        }),
       });
 
-      console.log("✅ Setup Successful:", signature);
+      if (!approveRes.ok) {
+        const err = await approveRes.json();
+        throw new Error(err.error || "Approval failed");
+      }
+
       setRemainingMonths(subscriptionMonths);
       setStatus("active");
       await fetchBalance();
 
     } catch (err: any) {
-      console.error("Subscription error:", err);
-      // Nice error message handling
-      let msg = err.message;
-      if (msg.includes("0x1783") || msg.includes("Transaction is too old")) {
-        msg = "Network Lag Error: Please sync your computer clock and try again.";
-      } else if (msg.includes("0x2")) {
-        msg = "Initialization Error: Ensure you have at least 0.01 SOL in your Smart Wallet.";
-      }
-      setErrorMessage(msg);
+      setErrorMessage(err.message);
       setStatus("idle");
     }
   };

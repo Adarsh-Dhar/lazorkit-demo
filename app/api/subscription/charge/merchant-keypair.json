@@ -1,0 +1,4 @@
+// merchant-keypair.json
+// This file should be gitignored and kept secret in production!
+// Example: [12,34,56,...] (array of 64 numbers)
+[]

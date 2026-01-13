@@ -6,6 +6,7 @@ import {
   Transaction,
   sendAndConfirmTransaction,
 } from "@solana/web3.js";
+import fs from "fs";
 import {
   createTransferCheckedInstruction,
   TOKEN_PROGRAM_ID,
@@ -28,49 +29,54 @@ export async function POST(req: Request) {
 
     // 1. Reconstruct Session Key
     const sessionKey = Keypair.fromSecretKey(new Uint8Array(sub.sessionKeySecret));
-    
+
     // 2. Setup Connection
     const connection = new Connection(LAZORKIT_CONFIG.rpc, "confirmed");
     const userUsdcAccount = new PublicKey(sub.userUsdcAccount);
     const merchantUsdcAccount = await getMerchantUsdcAta();
 
-    // 3. Calculate Amount (e.g. 1.0 USDC)
     const usdcAmount = BigInt(Math.round(sub.monthlyRate * Math.pow(10, SOLANA_CONFIG.USDC_DECIMALS)));
 
-    // 4. Create Transfer Instruction
-    // Authority is sessionKey.publicKey (The Delegate)
+    // [NEW] Load merchant keypair as fee payer
+    let merchantKeypair;
+    try {
+      const keypairPath = __dirname + "/merchant-keypair.json";
+      const secret = JSON.parse(fs.readFileSync(keypairPath, "utf8"));
+      merchantKeypair = Keypair.fromSecretKey(Uint8Array.from(secret));
+    } catch (e) {
+      return NextResponse.json({ error: "Merchant keypair not found or invalid. Please set up merchant-keypair.json." }, { status: 500 });
+    }
+
+    // 3. Create Transfer Instruction
     const transferIx = createTransferCheckedInstruction(
-      userUsdcAccount,          
-      SOLANA_CONFIG.USDC_MINT,  
-      merchantUsdcAccount,      
-      sessionKey.publicKey,     // 👈 KEY CHANGE: Session Key is the Authority
-      usdcAmount,               
-      SOLANA_CONFIG.USDC_DECIMALS, 
-      [],                       
+      userUsdcAccount,
+      SOLANA_CONFIG.USDC_MINT,
+      merchantUsdcAccount,
+      sessionKey.publicKey, // Authority: Session Key
+      usdcAmount,
+      SOLANA_CONFIG.USDC_DECIMALS,
+      [],
       TOKEN_PROGRAM_ID
     );
 
     const tx = new Transaction().add(transferIx);
-    
-    // 5. Set Fee Payer (Crucial!)
-    // We funded this key in the frontend setup, so it can pay the 0.000005 SOL fee
-    tx.feePayer = sessionKey.publicKey; 
+    tx.feePayer = merchantKeypair.publicKey;
 
-    // 6. Sign & Send
+    // 4. Sign & Send
     const { blockhash } = await connection.getLatestBlockhash("confirmed");
     tx.recentBlockhash = blockhash;
-    tx.sign(sessionKey);
+    tx.partialSign(sessionKey);
+    tx.partialSign(merchantKeypair);
 
-    const signature = await sendAndConfirmTransaction(connection, tx, [sessionKey], {
+    const signature = await sendAndConfirmTransaction(connection, tx, [sessionKey, merchantKeypair], {
       commitment: "confirmed",
     });
 
     console.log(`✅ Charged ${sub.monthlyRate} USDC. Sig: ${signature}`);
 
-    // Update DB
     sub.monthsPrepaid -= 1;
     sub.nextChargeDate = Date.now() + 30 * 24 * 60 * 60 * 1000;
-    
+
     return NextResponse.json({
       ok: true,
       signature,
