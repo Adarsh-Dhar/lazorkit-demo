@@ -11,6 +11,7 @@ import {
 } from "@solana/web3.js"
 import {
   createApproveInstruction,
+  TOKEN_PROGRAM_ID,
 } from "@solana/spl-token"
 import Header from "@/components/header"
 import { Button } from "@/components/ui/button"
@@ -83,26 +84,22 @@ export default function SubscriptionPageContent() {
     setErrorMessage(null);
 
     try {
-      // Only generate a new session key if not already present
-      let currentSessionKey = sessionKey;
-      if (!currentSessionKey) {
-        currentSessionKey = Keypair.generate();
-        setSessionKey(currentSessionKey);
-      }
-
+      // 1. Generate Session Key
+      const newSessionKey = Keypair.generate();
       const smartWalletStr = (wallet as any).smartWallet;
       const payerPubkey = new PublicKey(smartWalletStr);
+
       const userUsdcAccount = await getUserUsdcAta(payerPubkey);
       const totalAmountToApprove = SOLANA_CONFIG.getUsdcAmountForMonths(subscriptionMonths);
 
-      // Save session key and subscription info to backend
+      // 2. Save Session Key to Backend (API)
       const saveRes = await fetch("/api/subscription/create", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           userAddress: payerPubkey.toString(),
           userUsdcAccount: userUsdcAccount.toString(),
-          sessionKeySecret: Array.from(currentSessionKey.secretKey),
+          sessionKeySecret: Array.from(newSessionKey.secretKey),
           monthsPrepaid: subscriptionMonths,
           monthlyRate: SOLANA_CONFIG.SUBSCRIPTION_MONTHLY_RATE_USDC,
           approvedAmount: totalAmountToApprove,
@@ -113,26 +110,30 @@ export default function SubscriptionPageContent() {
       const saveData = await saveRes.json();
       setSubscriptionId(saveData.subscriptionId);
 
-      // Ask backend to send approval transaction
-      const approveRes = await fetch("/api/subscription/approve", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          subscriptionId: saveData.subscriptionId,
-        }),
+      // 3. Create Approval Instruction (Client Side)
+      const approveIx = createApproveInstruction(
+        userUsdcAccount,          // User's USDC Account
+        newSessionKey.publicKey,  // Delegate (Session Key)
+        payerPubkey,              // Owner (Smart Wallet Address)
+        BigInt(totalAmountToApprove),
+        [],
+        TOKEN_PROGRAM_ID
+      );
+
+      // 4. Sign & Send (User signs this!)
+      const signature = await signAndSendTransaction({
+        instructions: [approveIx],
       });
 
-      if (!approveRes.ok) {
-        const err = await approveRes.json();
-        throw new Error(err.error || "Approval failed");
-      }
-
+      console.log("✅ Setup Successful:", signature);
+      setSessionKey(newSessionKey);
       setRemainingMonths(subscriptionMonths);
       setStatus("active");
       await fetchBalance();
 
     } catch (err: any) {
-      setErrorMessage(err.message);
+      console.error("Subscription Error:", err);
+      setErrorMessage(err.message || "Failed to subscribe");
       setStatus("idle");
     }
   };
