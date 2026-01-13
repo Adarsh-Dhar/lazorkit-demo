@@ -2,169 +2,24 @@
 "use client"
 
 import { useState, useEffect } from "react"
-import { useWallet } from "@lazorkit/wallet" 
-import { 
-  PublicKey, 
-  Keypair,
-  Connection,
-  SystemProgram,
-} from "@solana/web3.js"
-import {
-  createApproveInstruction,
-  TOKEN_PROGRAM_ID,
-} from "@solana/spl-token"
 import Header from "@/components/header"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Loader2, CheckCircle2, Zap, RefreshCw, AlertCircle } from "lucide-react"
-import { SOLANA_CONFIG, LAZORKIT_CONFIG } from "@/lib/config"
-import { getUserUsdcAta } from "@/lib/utils"
+import { SOLANA_CONFIG } from "@/lib/config"
+
 
 export default function SubscriptionPageContent() {
-  const { isConnected, signAndSendTransaction, wallet } = useWallet()
   const [status, setStatus] = useState<"idle" | "authorizing" | "active">("idle")
   const [balance, setBalance] = useState<number | null>(null)
   const [balanceLoading, setBalanceLoading] = useState(false)
   const [balanceError, setBalanceError] = useState<string | null>(null)
-  const [subscriptionId, setSubscriptionId] = useState<string | null>(null)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
   const [subscriptionMonths, setSubscriptionMonths] = useState(1)
   const [remainingMonths, setRemainingMonths] = useState(0)
   const [billingHistory, setBillingHistory] = useState<Array<{ id: string; amount: string; date: string; status: string }>>([])
-  const [sessionKey, setSessionKey] = useState<Keypair | null>(null)
 
-  // Helper to fetch balance
-  const fetchBalance = async () => {
-    setBalanceLoading(true)
-    setBalanceError(null)
-    setBalance(null)
-    if (!wallet) {
-      setBalanceLoading(false)
-      return
-    }
-    try {
-      if(!LAZORKIT_CONFIG.rpc) throw new Error("RPC URL not configured")
-      const connection = new Connection(LAZORKIT_CONFIG.rpc, "confirmed")
-      const smartWalletStr = (wallet as any).smartWallet
-      if (smartWalletStr) {
-        const smartWalletPubkey = new PublicKey(smartWalletStr)
-        const userUsdcAccount = await getUserUsdcAta(smartWalletPubkey)
-        try {
-          const accountInfo = await connection.getTokenAccountBalance(userUsdcAccount, "confirmed")
-          setBalance(accountInfo.value.uiAmount)
-        } catch(e) {
-          setBalance(0)
-        }
-      } else {
-        setBalanceError("No smart wallet address found.")
-      }
-    } catch (err: any) {
-      setBalanceError(err?.message || "Balance fetch error")
-    } finally {
-      setBalanceLoading(false)
-    }
-  }
-
-  useEffect(() => {
-    if (isConnected && wallet) fetchBalance()
-    else {
-      setBalance(null)
-      setBalanceError(null)
-    }
-  }, [isConnected, wallet])
-
-  const handleSubscribe = async () => {
-    if (!isConnected || !wallet) {
-      setErrorMessage("Please connect your wallet first.");
-      return;
-    }
-
-    setStatus("authorizing");
-    setErrorMessage(null);
-
-    try {
-      // 1. Generate Session Key
-      const newSessionKey = Keypair.generate();
-      const smartWalletStr = (wallet as any).smartWallet;
-      const payerPubkey = new PublicKey(smartWalletStr);
-
-      const userUsdcAccount = await getUserUsdcAta(payerPubkey);
-      const totalAmountToApprove = SOLANA_CONFIG.getUsdcAmountForMonths(subscriptionMonths);
-
-      // 2. Save Session Key to Backend (API)
-      const saveRes = await fetch("/api/subscription/create", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          userAddress: payerPubkey.toString(),
-          userUsdcAccount: userUsdcAccount.toString(),
-          sessionKeySecret: Array.from(newSessionKey.secretKey),
-          monthsPrepaid: subscriptionMonths,
-          monthlyRate: SOLANA_CONFIG.SUBSCRIPTION_MONTHLY_RATE_USDC,
-          approvedAmount: totalAmountToApprove,
-        }),
-      });
-
-      if (!saveRes.ok) throw new Error("Failed to save session key");
-      const saveData = await saveRes.json();
-      setSubscriptionId(saveData.subscriptionId);
-
-      // 3. Create Approval Instruction (Client Side)
-      const approveIx = createApproveInstruction(
-        userUsdcAccount,          // User's USDC Account
-        newSessionKey.publicKey,  // Delegate (Session Key)
-        payerPubkey,              // Owner (Smart Wallet Address)
-        BigInt(totalAmountToApprove),
-        [],
-        TOKEN_PROGRAM_ID
-      );
-
-      // 4. Sign & Send (User signs this!)
-      const signature = await signAndSendTransaction({
-        instructions: [approveIx],
-      });
-
-      console.log("✅ Setup Successful:", signature);
-      setSessionKey(newSessionKey);
-      setRemainingMonths(subscriptionMonths);
-      setStatus("active");
-      await fetchBalance();
-
-    } catch (err: any) {
-      console.error("Subscription Error:", err);
-      setErrorMessage(err.message || "Failed to subscribe");
-      setStatus("idle");
-    }
-  };
-
-  const handleAutomatedCharge = async () => {
-    if (!subscriptionId) {
-        setErrorMessage("No active subscription found.");
-        return;
-    }
-    const newId = Math.random().toString(36).substr(2, 9)
-    setBillingHistory(prev => [{ id: newId, amount: "Processing...", date: "Now", status: "Pending" }, ...prev])
-
-    try {
-      const res = await fetch("/api/subscription/charge", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ subscriptionId })
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Charge failed");
-      
-      setBillingHistory(prev => prev.map(item => 
-        item.id === newId ? { ...item, amount: `${data.amountCharged} USDC`, status: "Success" } : item
-      ));
-      setRemainingMonths(data.monthsRemaining);
-      await fetchBalance();
-    } catch (err: any) {
-      setBillingHistory(prev => prev.map(item => item.id === newId ? { ...item, status: "Failed" } : item))
-      setErrorMessage(err.message)
-    }
-  }
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 dark:bg-slate-950 dark:text-slate-50">
@@ -206,7 +61,7 @@ export default function SubscriptionPageContent() {
                        <p className="text-2xl font-bold text-blue-600">{SOLANA_CONFIG.getTotalUsdcForMonths(subscriptionMonths).toFixed(2)} USDC</p>
                     </div>
                   </div>
-                  <Button onClick={handleSubscribe} className="w-full h-12 text-lg">Subscribe with Passkey</Button>
+                  <Button className="w-full h-12 text-lg">Subscribe with Passkey</Button>
                 </>
               ) : status === "authorizing" ? (
                 <Button disabled className="w-full h-12 text-lg"><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Authorizing...</Button>
@@ -241,7 +96,7 @@ export default function SubscriptionPageContent() {
         {status === "active" && (
           <div className="mt-12 p-6 bg-blue-50 rounded-xl border-2 border-blue-200">
               <div className="flex items-center gap-4">
-                <Button onClick={handleAutomatedCharge} className="gap-2"><RefreshCw className="w-4 h-4" /> Trigger Auto-Charge (Backend)</Button>
+                <Button className="gap-2"><RefreshCw className="w-4 h-4" /> Trigger Auto-Charge (Backend)</Button>
                 <p className="text-sm text-blue-700">This simulates the monthly Cron Job running on the server.</p>
               </div>
           </div>
