@@ -11,17 +11,17 @@ export function cn(...inputs: ClassValue[]) {
 }
 
 /**
- * Get the user's USDC Associated Token Account address
- * @param userPublicKey The user's wallet public key
+ * Get the USDC Associated Token Account address for a given owner
+ * @param ownerPublicKey The public key of the ATA owner (should be session key for subscriptions)
  * @returns The ATA address for USDC
  */
-export async function getUserUsdcAta(userPublicKey: PublicKey): Promise<PublicKey> {
+export async function getUserUsdcAta(ownerPublicKey: PublicKey): Promise<PublicKey> {
   return getAssociatedTokenAddress(
     SOLANA_CONFIG.USDC_MINT,
-    userPublicKey,
-    true, // allowOwnerOffCurve - smart wallets may use off-curve keys
+    ownerPublicKey,
+    true, // allowOwnerOffCurve - session keys may be off-curve
     TOKEN_PROGRAM_ID
-  )
+  );
 }
 
 /**

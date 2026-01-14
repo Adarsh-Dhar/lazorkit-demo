@@ -3,7 +3,7 @@
 import dynamic from "next/dynamic"
 
 // Render subscription experience directly on the homepage
-const SubscriptionPageContent = dynamic(() => import("./subscription/subscription-content"), {
+const SubscriptionPageContent = dynamic(() => import("../components/subscription-content"), {
   ssr: false,
 })
 
