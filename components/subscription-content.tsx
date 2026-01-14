@@ -46,96 +46,87 @@ export default function SubscriptionPageContent() {
     try {
       const connection = new Connection(SOLANA_CONFIG.RPC_URL!, "confirmed");
 
-      // 1. Get the correct ATA
+      // 1. Get the correct ATA (with allowOwnerOffCurve = true)
       const userUsdcAccount = await getAssociatedTokenAddress(
         SOLANA_CONFIG.USDC_MINT,
         smartWalletPubkey,
-        true
+        true // CRITICAL for Smart Wallets/PDAs
       );
 
-      // [DEBUGGING] Log these to your console to verify where funds are!
-      console.log("Checking Wallet:", smartWalletPubkey.toString());
-      console.log("Looking for USDC in ATA:", userUsdcAccount.toString());
-      console.log("Required Mint:", SOLANA_CONFIG.USDC_MINT.toString());
+      console.log("Smart Wallet:", smartWalletPubkey.toString());
+      console.log("USDC ATA:", userUsdcAccount.toString());
 
-      // 2. Check Account Status
+      // 2. Check Account & Balance
       const ataInfo = await connection.getAccountInfo(userUsdcAccount);
-      const isTokenAccount = ataInfo && ataInfo.owner.equals(TOKEN_PROGRAM_ID);
-
-      // 3. Create Approval Instruction (Client Side)
-      // [FIX] Use createApproveInstruction instead of Checked.
-      // Checked requires strict Mint checks that often fail with Smart Wallet PDAs during simulation.
-      const newSessionKey = Keypair.generate();
-      const totalAmountToApprove = BigInt(Math.round(SOLANA_CONFIG.getTotalUsdcForMonths(subscriptionMonths) * Math.pow(10, SOLANA_CONFIG.USDC_DECIMALS)));
-      const approveIx = createApproveInstruction(
-        userUsdcAccount,          // Account (ATA)
-        newSessionKey.publicKey,  // Delegate (The Session Key)
-        smartWalletPubkey,        // Owner (Your Smart Wallet Address)
-        totalAmountToApprove,     // Amount
-        [],                       // MultiSigners
-        TOKEN_PROGRAM_ID
-      );
-
-      console.log("Simulating transaction with simple approve instruction.");
-
       const tx = new Transaction();
-      // Bundle ATA creation if needed
+
+      // If ATA doesn't exist, create it (Smart Wallet must have SOL for rent!)
       if (!ataInfo) {
-        console.log("Bundling ATA creation...");
+        console.log("ATA missing. Adding Create Instruction...");
         const { createAssociatedTokenAccountInstruction } = await import("@solana/spl-token");
         tx.add(
           createAssociatedTokenAccountInstruction(
-            smartWalletPubkey,
-            userUsdcAccount,
-            smartWalletPubkey,
+            smartWalletPubkey, // Payer
+            userUsdcAccount,   // ATA
+            smartWalletPubkey, // Owner
             SOLANA_CONFIG.USDC_MINT
           )
         );
       }
 
+      // 3. Create Approval
+      const newSessionKey = Keypair.generate();
+      const totalAmountToApprove = BigInt(Math.round(SOLANA_CONFIG.getTotalUsdcForMonths(subscriptionMonths) * Math.pow(10, SOLANA_CONFIG.USDC_DECIMALS)));
+      const approveIx = createApproveInstruction(
+        userUsdcAccount,
+        newSessionKey.publicKey,
+        smartWalletPubkey,
+        totalAmountToApprove,
+        [],
+        TOKEN_PROGRAM_ID
+      );
       tx.add(approveIx);
 
-      // 4. Build & Send
+      // 4. Send
       const { blockhash } = await connection.getLatestBlockhash();
       tx.recentBlockhash = blockhash;
       tx.feePayer = smartWalletPubkey;
-      tx.signatures = [];
+
+      // LazorKit's signAndSendTransaction handles Passkey signature + Paymaster logic
+      console.log("Requesting Passkey Signature...");
       const signature = await signAndSendTransaction(tx);
-      console.log("Transaction sent with signature:", signature);
+      console.log("Tx Sent:", signature);
       await connection.confirmTransaction(signature, "confirmed");
 
-      // 5. Backend Registration
-      let response;
-      try {
-        response = await fetch("/api/subscription/create", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            userAddress: smartWalletPubkey.toString(),
-            sessionKeySecret: Array.from(newSessionKey.secretKey),
-            months: subscriptionMonths,
-            amount: SOLANA_CONFIG.SUBSCRIPTION_MONTHLY_RATE_USDC
-          })
-        });
-        console.log("response", response);
-      } catch (err) {
-        console.error("fetch to /api/subscription/create failed", { err });
-        throw new Error("Failed to contact backend: " + (err instanceof Error ? err.message : String(err)));
-      }
+      // 5. Backend Registration (include all required fields)
+      const response = await fetch("/api/subscription/create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          userAddress: smartWalletPubkey.toString(),
+          userUsdcAccount: userUsdcAccount.toString(),
+          sessionKeySecret: Array.from(newSessionKey.secretKey),
+          monthsPrepaid: subscriptionMonths,
+          monthlyRate: SOLANA_CONFIG.SUBSCRIPTION_MONTHLY_RATE_USDC,
+          approvedAmount: Number(totalAmountToApprove)
+        })
+      });
+
       if (!response.ok) {
-        const errData = await response.json().catch(() => ({}));
-        throw new Error(errData.error || "Backend failed to register subscription");
+        const errData = await response.json();
+        throw new Error(errData.error || "Backend registration failed");
       }
 
       setStatus("active");
       setRemainingMonths(subscriptionMonths);
+      // Optionally: refresh balance here
+
     } catch (error: any) {
-      console.error("Subscription failed:", error);
-      if (error.message.includes("0x2")) {
-        setErrorMessage("Account Error: Do you have USDC from the correct Mint?");
-      } else {
-        setErrorMessage(error.message || "Failed to subscribe");
-      }
+      console.error("Subscription Error:", error);
+      let msg = error.message || "Failed to subscribe";
+      if (msg.includes("0x1")) msg = "Insufficient SOL in Smart Wallet for gas/rent.";
+      if (msg.includes("0x2")) msg = "Invalid Owner. Ensure your Smart Wallet is initialized.";
+      setErrorMessage(msg);
       setStatus("idle");
     }
   };
