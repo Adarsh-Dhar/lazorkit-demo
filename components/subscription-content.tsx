@@ -59,120 +59,67 @@ export default function SubscriptionPageContent() {
       console.log("Required Mint:", SOLANA_CONFIG.USDC_MINT.toString());
 
       // 2. Check Account Status
-      const accountInfo = await connection.getAccountInfo(userUsdcAccount);
-      console.log("Account Info:", accountInfo);
-      const transaction = new Transaction();
+      const ataInfo = await connection.getAccountInfo(userUsdcAccount);
+      const isTokenAccount = ataInfo && ataInfo.owner.equals(TOKEN_PROGRAM_ID);
 
-      // [FIX] Detect if account exists but is NOT a token account (System owned) or if it doesn't exist at all.
-      const isTokenAccount = accountInfo && accountInfo.owner.equals(TOKEN_PROGRAM_ID);
-      console.log("Is Token Account:", isTokenAccount);
-
-      let mintAddress = null;
-      let tokenBalance = null;
-      let ataOwnerAddress = null;
-      if (isTokenAccount && accountInfo) {
-        // Parse token account data
-        const { AccountLayout } = await import("@solana/spl-token");
-        try {
-          const data = AccountLayout.decode(accountInfo.data);
-          mintAddress = new PublicKey(data.mint).toString();
-          ataOwnerAddress = new PublicKey(data.owner).toString();
-          const BN = (await import("bn.js")).default;
-          tokenBalance = new BN(data.amount, 10, "le").toString();
-        } catch (e) {
-          setErrorMessage("Failed to decode token account balance.");
-          setStatus("idle");
-          return;
-        }
-        console.log("ATA Mint:", mintAddress);
-        console.log("ATA Balance:", tokenBalance);
-        console.log("ATA Owner:", ataOwnerAddress);
-        console.log("Smart Wallet Pubkey:", smartWalletPubkey.toString());
-        // Error if ATA owner does not match smartWalletPubkey
-        if (ataOwnerAddress !== smartWalletPubkey.toString()) {
-          setErrorMessage(`Token account owner mismatch! Expected ${smartWalletPubkey.toString()}, found ${ataOwnerAddress}.`);
-          setStatus("idle");
-          return;
-        }
-        // Error if wrong mint
-        if (mintAddress !== SOLANA_CONFIG.USDC_MINT.toString()) {
-          setErrorMessage(`Token account mint mismatch! Expected ${SOLANA_CONFIG.USDC_MINT.toString()}, found ${mintAddress}. Please fund your wallet with USDC for the correct mint.`);
-          setStatus("idle");
-          return;
-        }
-        // Error if zero balance
-        if (tokenBalance === "0") {
-          setErrorMessage("Your USDC token account has zero balance. Please fund your wallet.");
-          setStatus("idle");
-          return;
-        }
-      }
-
-      // Only add ATA creation if missing or invalid
-      if (!accountInfo || !isTokenAccount) {
-        console.log("ATA missing or invalid. Adding creation instruction...");
-        const { createAssociatedTokenAccountInstruction, ASSOCIATED_TOKEN_PROGRAM_ID } = await import("@solana/spl-token");
-        const createAtaIx = createAssociatedTokenAccountInstruction(
-          smartWalletPubkey, // Payer (The Smart Wallet pays for its own rent)
-          userUsdcAccount,   // The ATA to create
-          smartWalletPubkey, // The owner of the ATA
-          SOLANA_CONFIG.USDC_MINT
-        );
-        transaction.add(createAtaIx);
-      }
-
-      // 3. Generate Session Key
-      const sessionKey = Keypair.generate();
-      console.log("Generated Session Key:", sessionKey.publicKey.toString());
-
-      // 4. Calculate Amount
-      const totalAmountUSDC = SOLANA_CONFIG.getTotalUsdcForMonths(subscriptionMonths);
-      const amountInBaseUnits = BigInt(Math.round(totalAmountUSDC * Math.pow(10, SOLANA_CONFIG.USDC_DECIMALS)));
-      console.log(`Total Subscription Amount for ${subscriptionMonths} months:`, totalAmountUSDC, "USDC =", amountInBaseUnits.toString(), "base units");
-
-      // 5. Create Approval Instruction
+      // 3. Create Approval Instruction (Client Side)
+      // [FIX] Use createApproveInstruction instead of Checked.
+      // Checked requires strict Mint checks that often fail with Smart Wallet PDAs during simulation.
+      const newSessionKey = Keypair.generate();
+      const totalAmountToApprove = BigInt(Math.round(SOLANA_CONFIG.getTotalUsdcForMonths(subscriptionMonths) * Math.pow(10, SOLANA_CONFIG.USDC_DECIMALS)));
       const approveIx = createApproveInstruction(
-        userUsdcAccount,          // Source account
-        sessionKey.publicKey,     // Delegate
-        smartWalletPubkey,        // Owner
-        amountInBaseUnits,        // Amount
-        [],
+        userUsdcAccount,          // Account (ATA)
+        newSessionKey.publicKey,  // Delegate (The Session Key)
+        smartWalletPubkey,        // Owner (Your Smart Wallet Address)
+        totalAmountToApprove,     // Amount
+        [],                       // MultiSigners
         TOKEN_PROGRAM_ID
       );
-      console.log("Created Approve Instruction:", approveIx);
 
-      // [DEBUG] Optionally simulate with only approveIx to isolate error
-      transaction.instructions = [approveIx];
-      console.log("Simulating transaction with only approve instruction.");
+      console.log("Simulating transaction with simple approve instruction.");
 
-      // 6. Build & Send
+      const tx = new Transaction();
+      // Bundle ATA creation if needed
+      if (!ataInfo) {
+        console.log("Bundling ATA creation...");
+        const { createAssociatedTokenAccountInstruction } = await import("@solana/spl-token");
+        tx.add(
+          createAssociatedTokenAccountInstruction(
+            smartWalletPubkey,
+            userUsdcAccount,
+            smartWalletPubkey,
+            SOLANA_CONFIG.USDC_MINT
+          )
+        );
+      }
+
+      tx.add(approveIx);
+
+      // 4. Build & Send
       const { blockhash } = await connection.getLatestBlockhash();
-      transaction.recentBlockhash = blockhash;
-      transaction.feePayer = smartWalletPubkey;
-      // Clear any pre-existing signatures to avoid bloat
-      transaction.signatures = [];
-      // Only the smart wallet should be the signer
-      console.log("Final Transaction (Approve only):", transaction);
-      const signature = await signAndSendTransaction(transaction);
+      tx.recentBlockhash = blockhash;
+      tx.feePayer = smartWalletPubkey;
+      tx.signatures = [];
+      const signature = await signAndSendTransaction(tx);
       console.log("Transaction sent with signature:", signature);
       await connection.confirmTransaction(signature, "confirmed");
 
-      // 7. Backend Registration
+      // 5. Backend Registration
       let response;
       try {
-        response = await fetch("/api/subscription", {
+        response = await fetch("/api/subscription/create", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             userAddress: smartWalletPubkey.toString(),
-            sessionKeySecret: Array.from(sessionKey.secretKey),
+            sessionKeySecret: Array.from(newSessionKey.secretKey),
             months: subscriptionMonths,
             amount: SOLANA_CONFIG.SUBSCRIPTION_MONTHLY_RATE_USDC
           })
         });
         console.log("response", response);
       } catch (err) {
-        console.error("fetch to /api/subscription failed", { err });
+        console.error("fetch to /api/subscription/create failed", { err });
         throw new Error("Failed to contact backend: " + (err instanceof Error ? err.message : String(err)));
       }
       if (!response.ok) {
