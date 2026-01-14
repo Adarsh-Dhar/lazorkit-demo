@@ -30,7 +30,11 @@ export async function POST(req: Request) {
         merchantKeypair = Keypair.fromSecretKey(bs58.decode(merchantSecret));
     }
 
-    const connection = new Connection(LAZORKIT_CONFIG.rpc || "https://api.devnet.solana.com", "confirmed");
+    if(!process.env.NEXT_PUBLIC_RPC_URL) {
+      throw new Error("NEXT_PUBLIC_RPC_URL not set");
+    }
+
+    const connection = new Connection(process.env.NEXT_PUBLIC_RPC_URL);
     
     // 2. Prepare Addresses
     const userUsdcAccount = new PublicKey(sub.userUsdcAccount);

@@ -58,7 +58,11 @@ async function processSubscriptions() {
   console.log("🔄 Starting subscription processor...");
   console.log(`⏰ Current time: ${new Date().toISOString()}`);
 
-  const connection = new Connection(LAZORKIT_CONFIG.rpc, "confirmed");
+  if(!process.env.NEXT_PUBLIC_RPC_URL) {
+    throw new Error("NEXT_PUBLIC_RPC_URL not set");
+  }
+
+  const connection = new Connection(process.env.NEXT_PUBLIC_RPC_URL, "confirmed");
   let processedCount = 0;
   let errorCount = 0;
 
